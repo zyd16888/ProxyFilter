@@ -63,7 +63,10 @@ export default {
       const originalCount = config.proxies.length;
 
       // 过滤节点
-      const filteredProxies = filterProxies(config.proxies, nameFilter, typeFilter);
+      let filteredProxies = filterProxies(config.proxies, nameFilter, typeFilter);
+      
+      // 重命名节点
+      filteredProxies = renameProxies(filteredProxies);
       
       // 记录过滤后节点数量
       const filteredCount = filteredProxies.length;
@@ -129,6 +132,36 @@ function filterProxies(proxies, nameFilter, typeFilter) {
     }
 
     return nameMatch && typeMatch;
+  });
+}
+
+/**
+ * 重命名代理节点
+ * 规则：用"_"分割原始名称并取第一个，之后拼接上序号
+ */
+function renameProxies(proxies) {
+  // 用于跟踪每个前缀的计数
+  const prefixCounts = {};
+  
+  return proxies.map(proxy => {
+    if (proxy.name) {
+      // 分割名称并获取第一部分
+      const parts = proxy.name.split('_');
+      const prefix = parts[0] || 'node';
+      
+      // 更新该前缀的计数
+      prefixCounts[prefix] = (prefixCounts[prefix] || 0) + 1;
+      
+      // 创建新名称
+      const newName = `${prefix}_${prefixCounts[prefix]}`;
+      
+      // 返回带有新名称的代理节点
+      return {
+        ...proxy,
+        name: newName
+      };
+    }
+    return proxy;
   });
 }
 
