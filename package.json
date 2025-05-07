@@ -1,0 +1,9 @@
+{
+  "name": "clash-filter-api",
+  "version": "1.0.0",
+  "description": "Clash 配置过滤 API",
+  "main": "src/index.js",
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}
