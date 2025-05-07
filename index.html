@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clash配置过滤器</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Clash配置过滤器</h1>
+        <p class="description">这个工具可以帮助你过滤Clash配置文件中的节点，支持根据节点名称(name)和类型(type)进行过滤。</p>
+        <div class="card">
+            <div class="form-group">
+                <label for="url">配置文件URL：</label>
+                <input type="text" id="url" placeholder="请输入Clash配置文件URL">
+                <div class="example-link">
+                    <a href="#" id="use-example">使用本地示例配置</a>
+                </div>
+            </div>
+            
+            <div class="filter-section">
+                <h2>过滤条件</h2>
+                <div class="form-group">
+                    <label for="name-filter">Name过滤（支持正则表达式）：</label>
+                    <input type="text" id="name-filter" placeholder="例如: .*香港.*">
+                </div>
+                <div class="form-group">
+                    <label for="type-filter">Type过滤（支持正则表达式）：</label>
+                    <input type="text" id="type-filter" placeholder="例如: vmess|trojan">
+                </div>
+            </div>
+
+            <div class="actions">
+                <button id="submit-btn">提交并过滤</button>
+            </div>
+
+            <div id="result" class="result-section" style="display: none;">
+                <h2>过滤结果</h2>
+                <div class="result-info">
+                    <p>原始节点数量：<span id="original-count">0</span></p>
+                    <p>过滤后节点数量：<span id="filtered-count">0</span></p>
+                </div>
+                <button id="download-btn" disabled>下载过滤后的配置</button>
+            </div>
+
+            <div id="error-message" class="error" style="display: none;"></div>
+            <div id="loading" class="loading" style="display: none;">处理中...</div>
+        </div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html> 
