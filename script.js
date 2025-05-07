@@ -1,4 +1,61 @@
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    // 解析URL参数
+    const urlParams = new URLSearchParams(window.location.search);
+    const yamlUrl = urlParams.get('url');
+    const nameFilter = urlParams.get('name');
+    const typeFilter = urlParams.get('type');
+    
+    // 如果URL中包含参数，则自动执行过滤并返回结果
+    if (yamlUrl) {
+        // 隐藏原有UI
+        document.querySelector('.container').style.display = 'none';
+        document.body.style.padding = '0';
+        document.body.style.margin = '0';
+        
+        try {
+            // 获取并处理YAML
+            const yamlContent = await fetchYamlConfig(yamlUrl);
+            if (!yamlContent) {
+                document.body.innerHTML = '无法获取配置文件或格式不正确';
+                return;
+            }
+
+            const config = jsyaml.load(yamlContent);
+            if (!config || !config.proxies || !Array.isArray(config.proxies)) {
+                document.body.innerHTML = '配置文件格式不正确或不包含proxies数组';
+                return;
+            }
+
+            // 过滤节点
+            const filteredProxies = filterProxies(config.proxies, nameFilter, typeFilter);
+            
+            // 创建新的配置
+            const filteredConfig = {...config, proxies: filteredProxies};
+            
+            // 如果有proxy-groups，更新它们以仅包含过滤后的节点
+            if (config['proxy-groups'] && Array.isArray(config['proxy-groups'])) {
+                filteredConfig['proxy-groups'] = updateProxyGroups(
+                    config['proxy-groups'], 
+                    filteredProxies.map(p => p.name)
+                );
+            }
+
+            // 生成YAML并直接显示
+            const yamlString = jsyaml.dump(filteredConfig);
+            document.body.innerHTML = `<pre>${yamlString}</pre>`;
+            
+            // 设置样式使其看起来像代码
+            document.body.style.fontFamily = 'monospace';
+            document.body.style.whiteSpace = 'pre';
+            
+            return; // 不再执行下面的UI初始化代码
+        } catch (error) {
+            document.body.innerHTML = '处理配置文件时发生错误: ' + error.message;
+            return;
+        }
+    }
+    
+    // 以下是原有UI相关代码，URL模式下不会执行
     const urlInput = document.getElementById('url');
     const nameFilterInput = document.getElementById('name-filter');
     const typeFilterInput = document.getElementById('type-filter');
@@ -139,7 +196,9 @@ document.addEventListener('DOMContentLoaded', () => {
             return await response.text();
         } catch (error) {
             console.error('获取YAML配置出错:', error);
-            showError('获取配置文件失败: ' + error.message + '。您可以尝试直接上传配置文件绕过CORS限制。');
+            if (document.querySelector('.container')?.style.display !== 'none') {
+                showError('获取配置文件失败: ' + error.message + '。您可以尝试直接上传配置文件绕过CORS限制。');
+            }
             return null;
         }
     }
@@ -212,18 +271,31 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function showError(message) {
-        errorMessage.textContent = message;
-        errorMessage.style.display = 'block';
+        const errorMessage = document.getElementById('error-message');
+        if (errorMessage) {
+            errorMessage.textContent = message;
+            errorMessage.style.display = 'block';
+        }
     }
 
     function showLoading(isLoading) {
-        loading.style.display = isLoading ? 'block' : 'none';
-        submitBtn.disabled = isLoading;
+        const loading = document.getElementById('loading');
+        const submitBtn = document.getElementById('submit-btn');
+        if (loading && submitBtn) {
+            loading.style.display = isLoading ? 'block' : 'none';
+            submitBtn.disabled = isLoading;
+        }
     }
 
     function resetUI() {
-        errorMessage.style.display = 'none';
-        resultSection.style.display = 'none';
-        downloadBtn.disabled = true;
+        const errorMessage = document.getElementById('error-message');
+        const resultSection = document.getElementById('result');
+        const downloadBtn = document.getElementById('download-btn');
+        
+        if (errorMessage && resultSection && downloadBtn) {
+            errorMessage.style.display = 'none';
+            resultSection.style.display = 'none';
+            downloadBtn.disabled = true;
+        }
     }
 }); 
