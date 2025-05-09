@@ -82,8 +82,8 @@ export default {
     const yamlUrls = yamlUrlParam.split(',').map(u => u.trim()).filter(u => u);
     
     // 限制URL数量，避免过多处理
-    if (yamlUrls.length > 10) {
-      return new Response('Error: Too many URLs provided (maximum 10 allowed)', {
+    if (yamlUrls.length > 100) {
+      return new Response('Error: Too many URLs provided (maximum 100 allowed)', {
         status: 400,
         headers: corsHeaders
       });
@@ -127,8 +127,8 @@ export default {
           sourceUrlInfo.push(`${yamlUrl} (${config.proxies.length}个节点)`);
           
           // 限制处理节点数量，避免超出CPU限制
-          if (totalOriginalCount > 10000) {
-            return new Response('Error: Too many proxies to process (limit: 10000)', {
+          if (totalOriginalCount > 100000) {
+            return new Response('Error: Too many proxies to process (limit: 100000)', {
               status: 400,
               headers: corsHeaders
             });
