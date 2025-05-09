@@ -21,11 +21,11 @@ export default {
     const queryString = url.search;
     
     // 从原始查询字符串中提取 yamlUrl 参数的完整值
-    let yamlUrl = null;
+    let yamlUrlParam = null;
     const urlMatch = queryString.match(/[?&]url=([^&]+)/);
     if (urlMatch && urlMatch[1]) {
       // 解码URL参数
-      yamlUrl = decodeURIComponent(urlMatch[1]);
+      yamlUrlParam = decodeURIComponent(urlMatch[1]);
     }
     
     // 使用标准方法获取其他参数
@@ -34,8 +34,8 @@ export default {
     
     // 如果未提供参数，尝试使用环境变量中的默认值
     // 环境变量优先级: URL参数 > 环境变量
-    if (!yamlUrl && env.DEFAULT_URL) {
-      yamlUrl = env.DEFAULT_URL;
+    if (!yamlUrlParam && env.DEFAULT_URL) {
+      yamlUrlParam = env.DEFAULT_URL;
     }
     
     if (!nameFilter && env.DEFAULT_NAME_FILTER) {
@@ -52,46 +52,65 @@ export default {
     const forceTypeFilter = env.FORCE_TYPE_FILTER;
 
     // 验证必要参数
-    if (!yamlUrl) {
+    if (!yamlUrlParam) {
       return new Response('Error: Missing required parameter "url" or DEFAULT_URL environment variable', {
         status: 400,
         headers: corsHeaders
       });
     }
+    
+    // 分割多URL参数（用逗号分隔）
+    const yamlUrls = yamlUrlParam.split(',').map(u => u.trim()).filter(u => u);
 
     try {
-      // 获取 YAML 配置
-      const response = await fetch(yamlUrl);
-      if (!response.ok) {
-        return new Response(`Error: Failed to fetch configuration: ${response.status} ${response.statusText}`, {
-          status: 404,
-          headers: corsHeaders
-        });
-      }
-
-      const yamlContent = await response.text();
+      // 合并配置结果
+      let mergedProxies = [];
+      let firstConfig = null;
+      let totalOriginalCount = 0;
+      let sourceUrlInfo = [];
       
-      // 解析 YAML
-      let config;
-      try {
-        config = yaml.load(yamlContent);
-      } catch (e) {
-        return new Response(`Error: Invalid YAML format: ${e.message}`, {
+      // 处理每个URL
+      for (const yamlUrl of yamlUrls) {
+        try {
+          // 获取和解析YAML
+          const { config, error } = await fetchAndParseYaml(yamlUrl);
+          
+          if (error) {
+            sourceUrlInfo.push(`${yamlUrl} (错误: ${error})`);
+            continue;
+          }
+          
+          // 初始化第一个有效配置作为基础配置
+          if (!firstConfig) {
+            firstConfig = config;
+          }
+          
+          // 添加代理到合并列表
+          if (config.proxies && Array.isArray(config.proxies)) {
+            totalOriginalCount += config.proxies.length;
+            mergedProxies = [...mergedProxies, ...config.proxies];
+            sourceUrlInfo.push(`${yamlUrl} (${config.proxies.length}个节点)`);
+          }
+        } catch (e) {
+          sourceUrlInfo.push(`${yamlUrl} (错误: ${e.message})`);
+        }
+      }
+      
+      // 验证是否有有效的配置
+      if (!firstConfig) {
+        return new Response('Error: No valid configuration found from the provided URLs', {
           status: 400,
           headers: corsHeaders
         });
       }
 
-      // 验证配置格式
-      if (!config || !config.proxies || !Array.isArray(config.proxies)) {
-        return new Response('Error: Invalid configuration format or missing proxies array', {
+      // 验证是否有代理节点
+      if (mergedProxies.length === 0) {
+        return new Response('Error: No proxies found in the configurations', {
           status: 400,
           headers: corsHeaders
         });
       }
-
-      // 记录原始节点数量
-      const originalCount = config.proxies.length;
 
       // 构建有效的过滤器
       const effectiveNameFilter = combineFilters(nameFilter, forceNameFilter);
@@ -99,7 +118,7 @@ export default {
       
       // 过滤节点
       let filteredProxies = filterProxies(
-        config.proxies, 
+        mergedProxies, 
         effectiveNameFilter, 
         effectiveTypeFilter
       );
@@ -111,22 +130,22 @@ export default {
       const filteredCount = filteredProxies.length;
       
       // 创建新的配置
-      const filteredConfig = {...config, proxies: filteredProxies};
+      const filteredConfig = {...firstConfig, proxies: filteredProxies};
       
       // 如果有 proxy-groups，更新它们以仅包含过滤后的节点
-      if (config['proxy-groups'] && Array.isArray(config['proxy-groups'])) {
+      if (firstConfig['proxy-groups'] && Array.isArray(firstConfig['proxy-groups'])) {
         filteredConfig['proxy-groups'] = updateProxyGroups(
-          config['proxy-groups'], 
+          firstConfig['proxy-groups'], 
           filteredProxies.map(p => p.name)
         );
       }
 
       // 添加过滤信息作为注释
-      const filterInfo = `# 原始节点: ${originalCount}, 过滤后节点: ${filteredCount}\n` +
+      const filterInfo = `# 原始节点总计: ${totalOriginalCount}, 过滤后节点: ${filteredCount}\n` +
                          `# 名称过滤: ${nameFilter || '无'} ${forceNameFilter ? '(强制: ' + forceNameFilter + ')' : ''}\n` +
                          `# 类型过滤: ${typeFilter || '无'} ${forceTypeFilter ? '(强制: ' + forceTypeFilter + ')' : ''}\n` +
                          `# 生成时间: ${new Date().toISOString()}\n` +
-                         `# 配置源: ${yamlUrl}\n`;
+                         `# 配置源: \n# ${sourceUrlInfo.join('\n# ')}\n`;
       
       // 生成 YAML 并返回
       const yamlString = filterInfo + yaml.dump(filteredConfig);
@@ -145,6 +164,39 @@ export default {
     }
   }
 };
+
+/**
+ * 获取并解析 YAML 配置
+ * @param {string} yamlUrl YAML 配置URL
+ * @returns {Object} 包含配置对象或错误信息
+ */
+async function fetchAndParseYaml(yamlUrl) {
+  try {
+    // 获取 YAML 配置
+    const response = await fetch(yamlUrl);
+    if (!response.ok) {
+      return { 
+        error: `HTTP ${response.status} ${response.statusText}`
+      };
+    }
+
+    const yamlContent = await response.text();
+    
+    // 解析 YAML
+    const config = yaml.load(yamlContent);
+    
+    // 验证配置格式
+    if (!config || !config.proxies || !Array.isArray(config.proxies)) {
+      return {
+        error: "无效的配置格式或缺少proxies数组"
+      };
+    }
+    
+    return { config };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
 
 /**
  * 结合两个过滤器
