@@ -185,18 +185,8 @@ export default {
         effectiveTypeFilter
       );
       
-      // 提取用于重命名的前缀
-      let renamingPrefix = null;
-      
-      // 如果有名称过滤器，提取它的内容作为重命名前缀
-      if (nameFilter) {
-        // 尝试提取简单的名称过滤规则作为前缀
-        // 假设过滤器是简单的关键字或词组，而不是复杂的正则表达式
-        renamingPrefix = extractPrefixFromFilter(nameFilter);
-      }
-      
-      // 重命名节点，如果有指定前缀则使用它
-      filteredProxies = renameProxies(filteredProxies, renamingPrefix);
+      // 重命名节点，使用名称过滤条件
+      filteredProxies = renameProxies(filteredProxies, nameFilter);
       
       // 记录过滤后节点数量
       const filteredCount = filteredProxies.length;
@@ -236,38 +226,6 @@ export default {
     }
   }
 };
-
-/**
- * 从过滤器中提取可用作前缀的简单字符串
- * @param {string} filter 过滤器规则
- * @returns {string|null} 提取的前缀或null
- */
-function extractPrefixFromFilter(filter) {
-  if (!filter) return null;
-  
-  // 处理最常见的简单过滤场景
-  
-  // 如果过滤器是简单字词
-  if (/^[^\|\[\]\(\)\^\$\.\*\+\?\\]+$/.test(filter)) {
-    return filter;
-  }
-  
-  // 尝试识别常见的OR模式的第一部分，如 "日本|美国|香港"
-  const orMatch = filter.match(/^([^\|\[\]\(\)\^\$\.\*\+\?\\]+)\|/);
-  if (orMatch) {
-    return orMatch[1];
-  }
-  
-  // 对于更复杂的正则模式，尝试一些常见模式
-  // 如 (日本) 或 [日本] 等
-  const patternMatch = filter.match(/[\(\[](.*?)[\)\]]/);
-  if (patternMatch) {
-    return patternMatch[1];
-  }
-  
-  // 无法提取合适的前缀，使用默认值
-  return "node";
-}
 
 /**
  * 获取并解析 YAML 配置
@@ -1075,47 +1033,178 @@ function filterProxies(proxies, nameFilter, typeFilter) {
  * 如果提供了固定前缀，则使用该前缀统一命名所有节点
  * 否则，按原规则：用"_"分割原始名称并取第一个
  * @param {Array} proxies 要重命名的代理节点数组
- * @param {string} fixedPrefix 固定前缀，如果为null则使用原始节点名称第一部分
+ * @param {string} nameFilter 名称过滤条件，可能包含多个区域条件
  * @returns {Array} 重命名后的节点数组
  */
-function renameProxies(proxies, fixedPrefix) {
-  // 用于跟踪节点计数
-  let counter = 0;
-  
-  // 如果有固定前缀，使用它统一命名所有节点
-  if (fixedPrefix) {
+function renameProxies(proxies, nameFilter) {
+  // 如果没有过滤条件，使用原始命名逻辑
+  if (!nameFilter) {
+    // 用于跟踪不同前缀的节点计数
+    const prefixCounts = {};
+    
     return proxies.map(proxy => {
-      counter++;
-      return {
-        ...proxy,
-        name: `${fixedPrefix}_${counter}`
-      };
+      if (proxy.name) {
+        // 分割名称并获取第一部分
+        const parts = proxy.name.split('_');
+        const prefix = parts[0] || 'node';
+        
+        // 更新该前缀的计数
+        prefixCounts[prefix] = (prefixCounts[prefix] || 0) + 1;
+        
+        // 创建新名称
+        const newName = `${prefix}_${prefixCounts[prefix]}`;
+        
+        // 返回带有新名称的代理节点
+        return {
+          ...proxy,
+          name: newName
+        };
+      }
+      return proxy;
     });
   }
+
+  // 解析过滤条件中可能包含的区域名称
+  const regionConditions = parseRegionConditions(nameFilter);
   
-  // 否则使用原来的重命名逻辑（取节点名称的第一部分）
-  const prefixCounts = {};
+  // 用于跟踪每个区域的节点计数
+  const regionCounts = {};
   
+  // 根据节点名称匹配的区域进行重命名
   return proxies.map(proxy => {
-    if (proxy.name) {
-      // 分割名称并获取第一部分
-      const parts = proxy.name.split('_');
-      const prefix = parts[0] || 'node';
-      
-      // 更新该前缀的计数
-      prefixCounts[prefix] = (prefixCounts[prefix] || 0) + 1;
-      
-      // 创建新名称
-      const newName = `${prefix}_${prefixCounts[prefix]}`;
-      
-      // 返回带有新名称的代理节点
+    // 确定节点匹配的区域
+    const matchedRegion = determineMatchedRegion(proxy.name, regionConditions);
+    
+    // 更新该区域的计数
+    regionCounts[matchedRegion] = (regionCounts[matchedRegion] || 0) + 1;
+    
+    // 创建新名称，使用匹配的区域名称
+    const newName = `${matchedRegion}_${regionCounts[matchedRegion]}`;
+    
+    // 返回带有新名称的代理节点
+    return {
+      ...proxy,
+      name: newName
+    };
+  });
+}
+
+/**
+ * 解析过滤条件中包含的区域名称
+ * @param {string} nameFilter 名称过滤条件
+ * @returns {Array} 包含区域名称和备选形式的数组
+ */
+function parseRegionConditions(nameFilter) {
+  if (!nameFilter) return [];
+  
+  // 尝试提取过滤条件中的区域名称
+  const conditions = [];
+  
+  // 首先检查是否是简单的或条件，如 "jp|sg|kr|台湾"
+  const orParts = nameFilter.split('|');
+  if (orParts.length > 1) {
+    for (const part of orParts) {
+      const trimmedPart = part.trim();
+      // 检查是否是已知的区域名称或其备选形式
+      const matchedRegion = getRegionByNameOrAlternative(trimmedPart);
+      if (matchedRegion) {
+        conditions.push(matchedRegion);
+      } else {
+        conditions.push({
+          name: trimmedPart,
+          alternatives: []
+        });
+      }
+    }
+  } else {
+    // 如果不是简单的或条件，尝试其他模式，如 "(香港|日本)"
+    const bracketsMatch = nameFilter.match(/\((.*?)\)/);
+    if (bracketsMatch && bracketsMatch[1]) {
+      const innerParts = bracketsMatch[1].split('|');
+      for (const part of innerParts) {
+        const trimmedPart = part.trim();
+        const matchedRegion = getRegionByNameOrAlternative(trimmedPart);
+        if (matchedRegion) {
+          conditions.push(matchedRegion);
+        } else {
+          conditions.push({
+            name: trimmedPart,
+            alternatives: []
+          });
+        }
+      }
+    } else {
+      // 如果是单一条件，直接检查
+      const matchedRegion = getRegionByNameOrAlternative(nameFilter.trim());
+      if (matchedRegion) {
+        conditions.push(matchedRegion);
+      } else {
+        conditions.push({
+          name: nameFilter.trim(),
+          alternatives: []
+        });
+      }
+    }
+  }
+  
+  return conditions;
+}
+
+/**
+ * 根据名称或备选形式获取区域信息
+ * @param {string} nameOrAlt 区域名称或备选形式
+ * @returns {Object|null} 包含区域名称和备选形式的对象，未找到返回null
+ */
+function getRegionByNameOrAlternative(nameOrAlt) {
+  // 检查是否完全匹配某个区域名称
+  if (regionMappings[nameOrAlt]) {
+    return {
+      name: nameOrAlt,
+      alternatives: regionMappings[nameOrAlt]
+    };
+  }
+  
+  // 检查是否匹配某个区域的备选形式
+  for (const [region, alternatives] of Object.entries(regionMappings)) {
+    if (alternatives.includes(nameOrAlt)) {
       return {
-        ...proxy,
-        name: newName
+        name: region,
+        alternatives: alternatives
       };
     }
-    return proxy;
-  });
+  }
+  
+  return null;
+}
+
+/**
+ * 确定节点名称匹配的区域
+ * @param {string} nodeName 节点名称
+ * @param {Array} regionConditions 区域条件数组
+ * @returns {string} 匹配的区域名称，未匹配到返回"node"
+ */
+function determineMatchedRegion(nodeName, regionConditions) {
+  if (!nodeName || !regionConditions || regionConditions.length === 0) {
+    return "node";
+  }
+  
+  // 检查节点名称是否匹配任何区域名称或其备选形式
+  for (const region of regionConditions) {
+    // 首先检查区域名称
+    if (nodeName.toLowerCase().includes(region.name.toLowerCase())) {
+      return region.name;
+    }
+    
+    // 然后检查备选形式
+    for (const alt of region.alternatives) {
+      if (nodeName.toLowerCase().includes(alt.toLowerCase())) {
+        return region.name;  // 返回中文区域名称
+      }
+    }
+  }
+  
+  // 未匹配到任何区域，使用第一个条件的名称，或默认值"node"
+  return regionConditions.length > 0 ? regionConditions[0].name : "node";
 }
 
 /**
