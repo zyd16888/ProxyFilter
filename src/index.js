@@ -129,8 +129,18 @@ export default {
         effectiveTypeFilter
       );
       
-      // 重命名节点
-      filteredProxies = renameProxies(filteredProxies);
+      // 提取用于重命名的前缀
+      let renamingPrefix = null;
+      
+      // 如果有名称过滤器，提取它的内容作为重命名前缀
+      if (nameFilter) {
+        // 尝试提取简单的名称过滤规则作为前缀
+        // 假设过滤器是简单的关键字或词组，而不是复杂的正则表达式
+        renamingPrefix = extractPrefixFromFilter(nameFilter);
+      }
+      
+      // 重命名节点，如果有指定前缀则使用它
+      filteredProxies = renameProxies(filteredProxies, renamingPrefix);
       
       // 记录过滤后节点数量
       const filteredCount = filteredProxies.length;
@@ -170,6 +180,38 @@ export default {
     }
   }
 };
+
+/**
+ * 从过滤器中提取可用作前缀的简单字符串
+ * @param {string} filter 过滤器规则
+ * @returns {string|null} 提取的前缀或null
+ */
+function extractPrefixFromFilter(filter) {
+  if (!filter) return null;
+  
+  // 处理最常见的简单过滤场景
+  
+  // 如果过滤器是简单字词
+  if (/^[^\|\[\]\(\)\^\$\.\*\+\?\\]+$/.test(filter)) {
+    return filter;
+  }
+  
+  // 尝试识别常见的OR模式的第一部分，如 "日本|美国|香港"
+  const orMatch = filter.match(/^([^\|\[\]\(\)\^\$\.\*\+\?\\]+)\|/);
+  if (orMatch) {
+    return orMatch[1];
+  }
+  
+  // 对于更复杂的正则模式，尝试一些常见模式
+  // 如 (日本) 或 [日本] 等
+  const patternMatch = filter.match(/[\(\[](.*?)[\)\]]/);
+  if (patternMatch) {
+    return patternMatch[1];
+  }
+  
+  // 无法提取合适的前缀，使用默认值
+  return "node";
+}
 
 /**
  * 获取并解析 YAML 配置
@@ -290,10 +332,28 @@ function filterProxies(proxies, nameFilter, typeFilter) {
 
 /**
  * 重命名代理节点
- * 规则：用"_"分割原始名称并取第一个，之后拼接上序号
+ * 如果提供了固定前缀，则使用该前缀统一命名所有节点
+ * 否则，按原规则：用"_"分割原始名称并取第一个
+ * @param {Array} proxies 要重命名的代理节点数组
+ * @param {string} fixedPrefix 固定前缀，如果为null则使用原始节点名称第一部分
+ * @returns {Array} 重命名后的节点数组
  */
-function renameProxies(proxies) {
-  // 用于跟踪每个前缀的计数
+function renameProxies(proxies, fixedPrefix) {
+  // 用于跟踪节点计数
+  let counter = 0;
+  
+  // 如果有固定前缀，使用它统一命名所有节点
+  if (fixedPrefix) {
+    return proxies.map(proxy => {
+      counter++;
+      return {
+        ...proxy,
+        name: `${fixedPrefix}_${counter}`
+      };
+    });
+  }
+  
+  // 否则使用原来的重命名逻辑（取节点名称的第一部分）
   const prefixCounts = {};
   
   return proxies.map(proxy => {
