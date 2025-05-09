@@ -13,9 +13,28 @@ export default {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
     }
-
-    // 解析 URL 查询参数
+    
+    // 获取请求 URL 和路径
     const url = new URL(request.url);
+    const pathname = url.pathname;
+    
+    // 快速路径：处理常见的特殊请求
+    if (pathname === '/favicon.ico') {
+      return new Response(null, { status: 204 }); // 返回无内容响应
+    }
+    
+    if (pathname === '/robots.txt') {
+      return new Response('User-agent: *\nDisallow: /', {
+        headers: { 'Content-Type': 'text/plain' }
+      });
+    }
+    
+    if (pathname !== '/') {
+      return new Response('Not Found', {
+        status: 404,
+        headers: corsHeaders
+      });
+    }
     
     // 获取完整的原始查询字符串
     const queryString = url.search;
@@ -61,6 +80,14 @@ export default {
     
     // 分割多URL参数（用逗号分隔）
     const yamlUrls = yamlUrlParam.split(',').map(u => u.trim()).filter(u => u);
+    
+    // 限制URL数量，避免过多处理
+    if (yamlUrls.length > 10) {
+      return new Response('Error: Too many URLs provided (maximum 10 allowed)', {
+        status: 400,
+        headers: corsHeaders
+      });
+    }
 
     try {
       // 合并配置结果
@@ -69,30 +96,43 @@ export default {
       let totalOriginalCount = 0;
       let sourceUrlInfo = [];
       
-      // 处理每个URL
-      for (const yamlUrl of yamlUrls) {
-        try {
-          // 获取和解析YAML
-          const { config, error } = await fetchAndParseYaml(yamlUrl);
+      // 并行处理所有URL（而不是串行）
+      const configPromises = yamlUrls.map(yamlUrl => 
+        fetchAndParseYaml(yamlUrl)
+          .then(result => ({ yamlUrl, ...result }))
+          .catch(e => ({ yamlUrl, error: e.message }))
+      );
+      
+      // 等待所有请求完成
+      const results = await Promise.all(configPromises);
+      
+      // 处理所有结果
+      for (const result of results) {
+        const { yamlUrl, config, error } = result;
+        
+        if (error) {
+          sourceUrlInfo.push(`${yamlUrl} (错误: ${error})`);
+          continue;
+        }
+        
+        // 初始化第一个有效配置作为基础配置
+        if (!firstConfig && config) {
+          firstConfig = config;
+        }
+        
+        // 添加代理到合并列表
+        if (config && config.proxies && Array.isArray(config.proxies)) {
+          totalOriginalCount += config.proxies.length;
+          mergedProxies = [...mergedProxies, ...config.proxies];
+          sourceUrlInfo.push(`${yamlUrl} (${config.proxies.length}个节点)`);
           
-          if (error) {
-            sourceUrlInfo.push(`${yamlUrl} (错误: ${error})`);
-            continue;
+          // 限制处理节点数量，避免超出CPU限制
+          if (totalOriginalCount > 10000) {
+            return new Response('Error: Too many proxies to process (limit: 10000)', {
+              status: 400,
+              headers: corsHeaders
+            });
           }
-          
-          // 初始化第一个有效配置作为基础配置
-          if (!firstConfig) {
-            firstConfig = config;
-          }
-          
-          // 添加代理到合并列表
-          if (config.proxies && Array.isArray(config.proxies)) {
-            totalOriginalCount += config.proxies.length;
-            mergedProxies = [...mergedProxies, ...config.proxies];
-            sourceUrlInfo.push(`${yamlUrl} (${config.proxies.length}个节点)`);
-          }
-        } catch (e) {
-          sourceUrlInfo.push(`${yamlUrl} (错误: ${e.message})`);
         }
       }
       
@@ -220,8 +260,23 @@ function extractPrefixFromFilter(filter) {
  */
 async function fetchAndParseYaml(yamlUrl) {
   try {
+    // 设置获取超时
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
+    
     // 获取 YAML 配置
-    const response = await fetch(yamlUrl);
+    const response = await fetch(yamlUrl, { 
+      signal: controller.signal,
+      cf: { cacheTtl: 300 } // 缓存5分钟
+    }).catch(err => {
+      if (err.name === 'AbortError') {
+        return { ok: false, status: 408, statusText: 'Request Timeout' };
+      }
+      throw err;
+    });
+    
+    clearTimeout(timeoutId); // 清除超时
+    
     if (!response.ok) {
       return { 
         error: `HTTP ${response.status} ${response.statusText}`

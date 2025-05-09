@@ -2,5 +2,8 @@ name = "clash-filter-api"
 main = "src/index.js"
 compatibility_date = "2023-05-18"
 
+[observability.logs]
+enabled = false
+
 [build]
 command = "npm install"
