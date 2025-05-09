@@ -45,6 +45,22 @@ export default {
     if (urlMatch && urlMatch[1]) {
       // 解码URL参数
       yamlUrlParam = decodeURIComponent(urlMatch[1]);
+      
+      // 处理直接提供的Base64数据内容
+      if (yamlUrlParam.startsWith('data:') && yamlUrlParam.includes('base64,')) {
+        try {
+          const base64Content = yamlUrlParam.split('base64,')[1];
+          const decodedContent = atob(base64Content);
+          
+          // 处理解码后的内容
+          return await processDirectContent(decodedContent, url, env, corsHeaders);
+        } catch (e) {
+          return new Response(`Error processing Base64 content: ${e.message}`, {
+            status: 400,
+            headers: corsHeaders
+          });
+        }
+      }
     }
     
     // 使用标准方法获取其他参数
@@ -378,21 +394,31 @@ function checkForNodeURIs(content) {
   const protocolPrefixes = ['vmess://', 'ss://', 'ssr://', 'trojan://', 'hysteria2://', 'vless://'];
   
   let validUriCount = 0;
+  let totalLines = lines.length;
   
   // 检查是否有行以协议前缀开头
   for (const line of lines) {
     for (const prefix of protocolPrefixes) {
-      // 更精确的检测：行必须以协议前缀开头，且不在引号或大括号内
-      if (line.startsWith(prefix) && !line.includes('name:') && !line.includes('"') && !line.includes("'") && !line.includes('{')) {
-        validUriCount++;
-        break;
+      // 更简单的检测：如果行以协议前缀开头且不是YAML文档的一部分，则认为是有效的URI
+      if (line.startsWith(prefix)) {
+        // 排除明显是YAML格式的行 
+        if (!line.includes('name:') && 
+            !line.includes('server:') && 
+            !line.includes('port:') && 
+            !line.includes('type:') &&
+            !line.includes(': {') &&
+            !line.includes('- {')) {
+          validUriCount++;
+          break;
+        }
       }
     }
   }
   
-  // 如果有多行匹配URI格式，更有可能是URI列表
-  // 或者如果总行数较少但大部分行都是URI，也认为是URI列表
-  return validUriCount > 0 && (validUriCount > 2 || validUriCount / lines.length > 0.5);
+  // 如果总行数很少（<10行）且至少有一个URI，或者
+  // 如果有多行URI（>1行）且占比较高（>30%），则认为是URI列表
+  return (totalLines < 10 && validUriCount > 0) || 
+         (validUriCount > 1 && (validUriCount / totalLines) > 0.3);
 }
 
 /**
@@ -450,7 +476,8 @@ function isBase64(str) {
       // 检查是否包含节点URI特征
       if (decoded.includes('vmess://') || 
           decoded.includes('ss://') || 
-          decoded.includes('trojan://') || 
+          decoded.includes('trojan://') ||
+          decoded.includes('vless://') || 
           decoded.includes('hysteria2://')) {
         return true; // 这是Base64编码的节点列表，应该解码
       }
@@ -565,51 +592,65 @@ function parseURI(uri) {
  * @returns {Object} Hysteria2节点对象
  */
 function parseHysteria2URI(uri, name) {
-  // 移除协议前缀
-  const content = uri.substring('hysteria2://'.length);
-  
-  // 分离用户信息和服务器信息
-  const atIndex = content.indexOf('@');
-  if (atIndex === -1) return null;
-  
-  const auth = content.substring(0, atIndex);
-  const serverPart = content.substring(atIndex + 1);
-  
-  // 分离服务器地址和端口
-  const colonIndex = serverPart.indexOf(':');
-  if (colonIndex === -1) return null;
-  
-  const server = serverPart.substring(0, colonIndex);
-  
-  // 分离端口和参数
-  let port = '';
-  let params = {};
-  
-  const questionMarkIndex = serverPart.indexOf('?', colonIndex);
-  if (questionMarkIndex === -1) {
-    port = serverPart.substring(colonIndex + 1);
-  } else {
-    port = serverPart.substring(colonIndex + 1, questionMarkIndex);
+  try {
+    // 移除协议前缀
+    const content = uri.substring('hysteria2://'.length);
     
-    // 解析参数
-    const paramsStr = serverPart.substring(questionMarkIndex + 1);
-    paramsStr.split('&').forEach(param => {
-      const [key, value] = param.split('=');
-      params[key] = value;
-    });
+    // 分离用户信息和服务器信息
+    const atIndex = content.indexOf('@');
+    if (atIndex === -1) return null;
+    
+    const auth = content.substring(0, atIndex);
+    const serverPart = content.substring(atIndex + 1);
+    
+    // 分离服务器地址和端口
+    const colonIndex = serverPart.indexOf(':');
+    if (colonIndex === -1) return null;
+    
+    const server = serverPart.substring(0, colonIndex);
+    
+    // 分离端口和参数
+    let port = '';
+    let params = {};
+    
+    const questionMarkIndex = serverPart.indexOf('?', colonIndex);
+    if (questionMarkIndex === -1) {
+      port = serverPart.substring(colonIndex + 1);
+    } else {
+      port = serverPart.substring(colonIndex + 1, questionMarkIndex);
+      
+      // 解析参数
+      const paramsStr = serverPart.substring(questionMarkIndex + 1);
+      paramsStr.split('&').forEach(param => {
+        const [key, value] = param.split('=');
+        if (key && value !== undefined) {
+          params[key] = decodeURIComponent(value);
+        }
+      });
+    }
+    
+    // 创建节点对象 - 支持更多Hysteria2参数
+    return {
+      name: name || `Hysteria2_${server}_${port}`,
+      type: 'hysteria2',
+      server: server,
+      port: parseInt(port),
+      password: auth,
+      sni: params.sni,
+      skip_cert_verify: params.insecure === '1' || params.insecure === 'true',
+      alpn: params.alpn ? params.alpn.split(',') : undefined,
+      obfs: params.obfs,
+      "obfs-password": params["obfs-password"],
+      up: params.up,
+      down: params.down,
+      "hop-interval": params["hop-interval"] ? parseInt(params["hop-interval"]) : undefined,
+      "fast-open": true,
+      udp: true
+    };
+  } catch (error) {
+    console.warn('Hysteria2 URI解析错误:', error);
+    return null;
   }
-  
-  // 创建节点对象
-  return {
-    name: name || `Hysteria2_${server}_${port}`,
-    type: 'hysteria2',
-    server: server,
-    port: parseInt(port),
-    password: auth,
-    sni: params.sni,
-    skip_cert_verify: params.insecure === '1',
-    alpn: params.alpn ? params.alpn.split(',') : undefined
-  };
 }
 
 /**
@@ -761,6 +802,101 @@ function parseTrojanURI(uri, name) {
     sni: params.sni,
     skip_cert_verify: params.allowInsecure === '1' || params.allowInsecure === 'true'
   };
+}
+
+/**
+ * 解析VLESS节点URI
+ * @param {string} uri VLESS URI
+ * @param {string} name 节点名称
+ * @returns {Object} VLESS节点对象
+ */
+function parseVlessURI(uri, name) {
+  try {
+    // VLESS URI格式: vless://uuid@server:port?param1=value1&param2=value2#name
+    const content = uri.substring('vless://'.length);
+    
+    // 分离uuid和服务器信息
+    const atIndex = content.indexOf('@');
+    if (atIndex === -1) return null;
+    
+    const uuid = content.substring(0, atIndex);
+    const serverPart = content.substring(atIndex + 1);
+    
+    // 分离服务器地址和端口
+    const colonIndex = serverPart.indexOf(':');
+    if (colonIndex === -1) return null;
+    
+    const server = serverPart.substring(0, colonIndex);
+    
+    // 分离端口和参数
+    let port = '';
+    let params = {};
+    
+    const questionMarkIndex = serverPart.indexOf('?', colonIndex);
+    if (questionMarkIndex === -1) {
+      port = serverPart.substring(colonIndex + 1);
+    } else {
+      port = serverPart.substring(colonIndex + 1, questionMarkIndex);
+      
+      // 解析参数
+      const paramsStr = serverPart.substring(questionMarkIndex + 1);
+      paramsStr.split('&').forEach(param => {
+        const [key, value] = param.split('=');
+        if (key && value !== undefined) {
+          params[key] = decodeURIComponent(value);
+        }
+      });
+    }
+    
+    // 创建节点对象，兼容Clash Meta格式
+    const vlessNode = {
+      name: name || `VLESS_${server}_${port}`,
+      type: 'vless',
+      server: server,
+      port: parseInt(port),
+      uuid: uuid,
+      flow: params.flow || '',
+      udp: true,
+      tls: params.security === 'tls' || params.security === 'reality',
+      "skip-cert-verify": params.insecure === '1' || params.allowInsecure === 'true',
+      servername: params.sni || params.servername,
+      network: params.type || 'tcp',
+      "reality-opts": params.security === 'reality' ? {
+        "public-key": params.pbk || '',
+        fingerprint: params.fp || '',
+        "short-id": params.sid || '',
+        "spider-x": params.spx || '/'
+      } : undefined
+    };
+    
+    // 添加适当的WS选项
+    if (vlessNode.network === 'ws') {
+      vlessNode["ws-opts"] = {
+        path: params.path || '/',
+        headers: params.host ? { Host: params.host } : undefined
+      };
+    }
+    
+    // 添加适当的HTTP选项
+    if (vlessNode.network === 'http') {
+      vlessNode["http-opts"] = {
+        path: params.path ? [params.path] : ['/'],
+        headers: params.host ? { Host: [params.host] } : undefined
+      };
+    }
+    
+    // 添加适当的GRPC选项
+    if (vlessNode.network === 'grpc') {
+      vlessNode["grpc-opts"] = {
+        "grpc-service-name": params["grpc-service-name"] || params["serviceName"] || ''
+      };
+    }
+    
+    return vlessNode;
+  } catch (error) {
+    console.warn('VLESS URI解析错误:', error);
+    return null;
+  }
 }
 
 /**
