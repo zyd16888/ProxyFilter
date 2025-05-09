@@ -112,6 +112,12 @@ export default {
         });
       }
 
+      // 节点去重
+      const beforeDedupeCount = mergedProxies.length;
+      mergedProxies = deduplicateProxies(mergedProxies);
+      const afterDedupeCount = mergedProxies.length;
+      const duplicateCount = beforeDedupeCount - afterDedupeCount;
+      
       // 构建有效的过滤器
       const effectiveNameFilter = combineFilters(nameFilter, forceNameFilter);
       const effectiveTypeFilter = combineFilters(typeFilter, forceTypeFilter);
@@ -141,7 +147,7 @@ export default {
       }
 
       // 添加过滤信息作为注释
-      const filterInfo = `# 原始节点总计: ${totalOriginalCount}, 过滤后节点: ${filteredCount}\n` +
+      const filterInfo = `# 原始节点总计: ${totalOriginalCount}, 去重后: ${afterDedupeCount} (移除了${duplicateCount}个重复节点), 过滤后节点: ${filteredCount}\n` +
                          `# 名称过滤: ${nameFilter || '无'} ${forceNameFilter ? '(强制: ' + forceNameFilter + ')' : ''}\n` +
                          `# 类型过滤: ${typeFilter || '无'} ${forceTypeFilter ? '(强制: ' + forceTypeFilter + ')' : ''}\n` +
                          `# 生成时间: ${new Date().toISOString()}\n` +
@@ -196,6 +202,45 @@ async function fetchAndParseYaml(yamlUrl) {
   } catch (e) {
     return { error: e.message };
   }
+}
+
+/**
+ * 节点去重
+ * 根据节点的关键属性（服务器、端口、类型等）去除重复节点
+ */
+function deduplicateProxies(proxies) {
+  const uniqueProxies = [];
+  const seen = new Set();
+  
+  for (const proxy of proxies) {
+    // 创建一个唯一标识，包含节点的核心配置
+    // 对于不同类型的节点，确保包含所有关键字段
+    let uniqueKey;
+    
+    if (proxy.type === 'ss') {
+      uniqueKey = `${proxy.type}:${proxy.server}:${proxy.port}:${proxy.cipher}`;
+    } else if (proxy.type === 'ssr') {
+      uniqueKey = `${proxy.type}:${proxy.server}:${proxy.port}:${proxy.cipher}:${proxy.protocol}:${proxy.obfs}`;
+    } else if (proxy.type === 'vmess') {
+      uniqueKey = `${proxy.type}:${proxy.server}:${proxy.port}:${proxy.uuid}:${proxy.alterId || 0}`;
+    } else if (proxy.type === 'trojan') {
+      uniqueKey = `${proxy.type}:${proxy.server}:${proxy.port}:${proxy.password}`;
+    } else if (proxy.type === 'http' || proxy.type === 'https' || proxy.type === 'socks5' || proxy.type === 'socks5-tls') {
+      uniqueKey = `${proxy.type}:${proxy.server}:${proxy.port}:${proxy.username || ''}:${proxy.password || ''}`;
+    } else {
+      // 对于未知类型的节点，使用JSON字符串作为唯一标识
+      // 排除name字段，因为名称不同但配置相同的节点应被视为重复
+      const { name, ...config } = proxy;
+      uniqueKey = JSON.stringify(config);
+    }
+    
+    if (!seen.has(uniqueKey)) {
+      seen.add(uniqueKey);
+      uniqueProxies.push(proxy);
+    }
+  }
+  
+  return uniqueProxies;
 }
 
 /**
