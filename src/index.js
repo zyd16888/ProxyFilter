@@ -16,7 +16,19 @@ export default {
 
     // 解析 URL 查询参数
     const url = new URL(request.url);
-    const yamlUrl = url.searchParams.get('url');
+    
+    // 获取完整的原始查询字符串
+    const queryString = url.search;
+    
+    // 从原始查询字符串中提取 yamlUrl 参数的完整值
+    let yamlUrl = null;
+    const urlMatch = queryString.match(/[?&]url=([^&]+)/);
+    if (urlMatch && urlMatch[1]) {
+      // 解码URL参数
+      yamlUrl = decodeURIComponent(urlMatch[1]);
+    }
+    
+    // 使用标准方法获取其他参数
     const nameFilter = url.searchParams.get('name');
     const typeFilter = url.searchParams.get('type');
 
