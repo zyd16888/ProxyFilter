@@ -283,27 +283,53 @@ async function fetchAndParseYaml(yamlUrl) {
       };
     }
 
-    let yamlContent = await response.text();
+    let content = await response.text();
     
     // 检查内容是否为Base64编码
-    if (isBase64(yamlContent)) {
+    if (isBase64(content)) {
       try {
         // 尝试解码Base64内容
-        const decodedContent = atob(yamlContent.trim());
-        yamlContent = decodedContent;
+        const decodedContent = atob(content.trim());
+        content = decodedContent;
       } catch (decodeError) {
         console.warn("Base64解码失败", decodeError);
         // 如果解码失败，继续使用原始内容
       }
     }
     
-    // 解析 YAML
-    const config = yaml.load(yamlContent);
+    // 检查解码后的内容是否是YAML格式，或是节点URI列表
+    let config;
     
-    // 验证配置格式
-    if (!config || !config.proxies || !Array.isArray(config.proxies)) {
+    // 首先检查内容是否包含节点URI的特征（如以协议前缀开头的行）
+    const hasNodeURIs = checkForNodeURIs(content);
+    
+    if (hasNodeURIs) {
+      // 如果明确包含节点URI，优先作为URI列表处理
+      config = parseURIListToConfig(content);
+      if (config && config.proxies && Array.isArray(config.proxies) && config.proxies.length > 0) {
+        return { config };
+      }
+    }
+    
+    // 尝试解析为YAML
+    try {
+      config = yaml.load(content);
+      
+      // 验证配置格式
+      if (config && config.proxies && Array.isArray(config.proxies)) {
+        return { config };
+      }
+    } catch (yamlError) {
+      // YAML解析失败，不做处理，继续尝试其他方法
+    }
+    
+    // 如果YAML解析失败或配置无效，尝试作为URI列表处理
+    config = parseURIListToConfig(content);
+    
+    // 再次验证配置格式
+    if (!config || !config.proxies || !Array.isArray(config.proxies) || config.proxies.length === 0) {
       return {
-        error: "无效的配置格式或缺少proxies数组"
+        error: "无效的配置格式或无法识别的节点格式"
       };
     }
     
@@ -311,6 +337,31 @@ async function fetchAndParseYaml(yamlUrl) {
   } catch (e) {
     return { error: e.message };
   }
+}
+
+/**
+ * 检查内容是否包含节点URI
+ * @param {string} content 要检查的内容
+ * @returns {boolean} 是否包含节点URI
+ */
+function checkForNodeURIs(content) {
+  if (!content) return false;
+  
+  // 将内容分成行
+  const lines = content.split(/\r?\n/).map(line => line.trim()).filter(line => line);
+  
+  // 检查是否有行以协议前缀开头
+  const protocolPrefixes = ['vmess://', 'ss://', 'ssr://', 'trojan://', 'hysteria2://', 'vless://'];
+  
+  for (const line of lines) {
+    for (const prefix of protocolPrefixes) {
+      if (line.startsWith(prefix)) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
 }
 
 /**
@@ -324,12 +375,15 @@ function isBase64(str) {
   // 去除空白字符
   const trimmed = str.trim();
   
-  // Base64字符串长度应为4的倍数（可能有填充）
-  if (trimmed.length % 4 !== 0 && !trimmed.endsWith('=')) return false;
+  // 如果长度太短，不太可能是有效的Base64内容
+  if (trimmed.length < 8) return false;
   
   // 检查是否只包含Base64字符
   const base64Regex = /^[A-Za-z0-9+/=]+$/;
   if (!base64Regex.test(trimmed)) return false;
+  
+  // 检查是否包含明确的节点前缀，如果是，不是Base64
+  if (checkForNodeURIs(trimmed)) return false;
   
   // 检查YAML格式特征，如果包含这些，不太可能是Base64
   if (trimmed.includes('proxies:') || 
@@ -339,17 +393,317 @@ function isBase64(str) {
   }
   
   try {
-    // 尝试解码并检查结果是否为有效文本
+    // 尝试解码
     const decoded = atob(trimmed);
     
-    // 检查解码结果是否包含YAML格式特征
-    return decoded.includes('proxies:') || 
-           decoded.includes('proxy-groups:') || 
-           decoded.includes('rules:');
+    // 检查解码结果是否包含常见格式的特征
+    if (decoded.includes('proxies:') || 
+        decoded.includes('proxy-groups:') || 
+        decoded.includes('rules:') ||
+        checkForNodeURIs(decoded)) {
+      return true;
+    }
+    
+    // 如果解码结果包含大量可读文本字符，可能是有效的Base64
+    const textChars = decoded.match(/[A-Za-z0-9\s,.;:?!-_'"]/g);
+    return textChars && textChars.length > decoded.length * 0.7;
   } catch (e) {
     // 解码失败，不是有效的Base64
     return false;
   }
+}
+
+/**
+ * 解析节点URI列表并转换为Clash配置
+ * @param {string} content URI列表文本
+ * @returns {Object} Clash配置对象
+ */
+function parseURIListToConfig(content) {
+  // 分割为行并过滤空行
+  const lines = content.split(/\r?\n/).map(line => line.trim()).filter(line => line);
+  
+  if (lines.length === 0) {
+    return null;
+  }
+  
+  // 处理所有类型的URI
+  const proxies = [];
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const proxy = parseURI(line);
+    
+    if (proxy) {
+      proxies.push(proxy);
+    }
+  }
+  
+  if (proxies.length === 0) {
+    return null;
+  }
+  
+  // 创建默认配置
+  return {
+    port: 7890,
+    'socks-port': 7891,
+    'allow-lan': true,
+    mode: 'rule',
+    'log-level': 'info',
+    proxies: proxies,
+    'proxy-groups': [
+      {
+        name: '节点选择',
+        type: 'select',
+        proxies: ['DIRECT', ...proxies.map(p => p.name)]
+      }
+    ],
+    rules: [
+      'MATCH,节点选择'
+    ]
+  };
+}
+
+/**
+ * 解析单个节点URI
+ * @param {string} uri 节点URI
+ * @returns {Object|null} 解析后的节点对象，解析失败返回null
+ */
+function parseURI(uri) {
+  try {
+    // 提取URI中的注释部分作为名称
+    let name = '';
+    const hashIndex = uri.indexOf('#');
+    if (hashIndex !== -1) {
+      name = decodeURIComponent(uri.substring(hashIndex + 1));
+      uri = uri.substring(0, hashIndex);
+    }
+    
+    // 处理不同类型的URI
+    if (uri.startsWith('hysteria2://')) {
+      return parseHysteria2URI(uri, name);
+    } else if (uri.startsWith('vmess://')) {
+      return parseVmessURI(uri, name);
+    } else if (uri.startsWith('ss://')) {
+      return parseSsURI(uri, name);
+    } else if (uri.startsWith('trojan://')) {
+      return parseTrojanURI(uri, name);
+    } else if (uri.startsWith('vless://')) {
+      return parseVlessURI(uri, name);
+    } else if (uri.startsWith('ssr://')) {
+      return parseSsrURI(uri, name);
+    }
+    
+    // 不支持的URI类型
+    return null;
+  } catch (error) {
+    console.warn('URI解析错误:', error, uri);
+    return null;
+  }
+}
+
+/**
+ * 解析Hysteria2节点URI
+ * @param {string} uri Hysteria2 URI
+ * @param {string} name 节点名称
+ * @returns {Object} Hysteria2节点对象
+ */
+function parseHysteria2URI(uri, name) {
+  // 移除协议前缀
+  const content = uri.substring('hysteria2://'.length);
+  
+  // 分离用户信息和服务器信息
+  const atIndex = content.indexOf('@');
+  if (atIndex === -1) return null;
+  
+  const auth = content.substring(0, atIndex);
+  const serverPart = content.substring(atIndex + 1);
+  
+  // 分离服务器地址和端口
+  const colonIndex = serverPart.indexOf(':');
+  if (colonIndex === -1) return null;
+  
+  const server = serverPart.substring(0, colonIndex);
+  
+  // 分离端口和参数
+  let port = '';
+  let params = {};
+  
+  const questionMarkIndex = serverPart.indexOf('?', colonIndex);
+  if (questionMarkIndex === -1) {
+    port = serverPart.substring(colonIndex + 1);
+  } else {
+    port = serverPart.substring(colonIndex + 1, questionMarkIndex);
+    
+    // 解析参数
+    const paramsStr = serverPart.substring(questionMarkIndex + 1);
+    paramsStr.split('&').forEach(param => {
+      const [key, value] = param.split('=');
+      params[key] = value;
+    });
+  }
+  
+  // 创建节点对象
+  return {
+    name: name || `Hysteria2_${server}_${port}`,
+    type: 'hysteria2',
+    server: server,
+    port: parseInt(port),
+    password: auth,
+    sni: params.sni,
+    skip_cert_verify: params.insecure === '1',
+    alpn: params.alpn ? params.alpn.split(',') : undefined
+  };
+}
+
+/**
+ * 解析VMess节点URI
+ * @param {string} uri VMess URI
+ * @param {string} name 节点名称
+ * @returns {Object} VMess节点对象
+ */
+function parseVmessURI(uri, name) {
+  // VMess URI格式: vmess://<base64>
+  const base64Content = uri.substring('vmess://'.length);
+  let config;
+  
+  try {
+    config = JSON.parse(atob(base64Content));
+  } catch (e) {
+    return null;
+  }
+  
+  return {
+    name: name || config.ps || `VMess_${config.add}_${config.port}`,
+    type: 'vmess',
+    server: config.add,
+    port: parseInt(config.port),
+    uuid: config.id,
+    alterId: parseInt(config.aid || '0'),
+    cipher: config.scy || 'auto',
+    tls: config.tls === 'tls',
+    'skip-cert-verify': config.verify_cert === 'false',
+    network: config.net || 'tcp',
+    'ws-path': config.path,
+    'ws-headers': config.host ? { Host: config.host } : undefined,
+    servername: config.sni
+  };
+}
+
+/**
+ * 解析Shadowsocks节点URI
+ * @param {string} uri Shadowsocks URI
+ * @param {string} name 节点名称
+ * @returns {Object} Shadowsocks节点对象
+ */
+function parseSsURI(uri, name) {
+  // SS URI格式: ss://BASE64(method:password)@server:port
+  const content = uri.substring('ss://'.length);
+  
+  // 检查是否是新格式 (Base64 + @server:port) 还是旧格式 (全部Base64)
+  let method, password, server, port;
+  
+  if (content.includes('@')) {
+    // 新格式
+    const atIndex = content.indexOf('@');
+    const auth = atob(content.substring(0, atIndex));
+    const serverPart = content.substring(atIndex + 1);
+    
+    const colonIndex = auth.indexOf(':');
+    if (colonIndex === -1) return null;
+    
+    method = auth.substring(0, colonIndex);
+    password = auth.substring(colonIndex + 1);
+    
+    const serverColonIndex = serverPart.indexOf(':');
+    if (serverColonIndex === -1) return null;
+    
+    server = serverPart.substring(0, serverColonIndex);
+    port = serverPart.substring(serverColonIndex + 1);
+  } else {
+    // 旧格式，全部Base64编码
+    try {
+      const decodedContent = atob(content);
+      const parts = decodedContent.split('@');
+      if (parts.length !== 2) return null;
+      
+      const authParts = parts[0].split(':');
+      if (authParts.length !== 2) return null;
+      
+      method = authParts[0];
+      password = authParts[1];
+      
+      const serverParts = parts[1].split(':');
+      if (serverParts.length !== 2) return null;
+      
+      server = serverParts[0];
+      port = serverParts[1];
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  // 创建节点对象
+  return {
+    name: name || `SS_${server}_${port}`,
+    type: 'ss',
+    server: server,
+    port: parseInt(port),
+    cipher: method,
+    password: password
+  };
+}
+
+/**
+ * 解析Trojan节点URI
+ * @param {string} uri Trojan URI
+ * @param {string} name 节点名称
+ * @returns {Object} Trojan节点对象
+ */
+function parseTrojanURI(uri, name) {
+  // Trojan URI格式: trojan://password@server:port?sni=xxx
+  const content = uri.substring('trojan://'.length);
+  
+  // 分离密码和服务器信息
+  const atIndex = content.indexOf('@');
+  if (atIndex === -1) return null;
+  
+  const password = content.substring(0, atIndex);
+  const serverPart = content.substring(atIndex + 1);
+  
+  // 分离服务器地址和端口
+  const colonIndex = serverPart.indexOf(':');
+  if (colonIndex === -1) return null;
+  
+  const server = serverPart.substring(0, colonIndex);
+  
+  // 分离端口和参数
+  let port = '';
+  let params = {};
+  
+  const questionMarkIndex = serverPart.indexOf('?', colonIndex);
+  if (questionMarkIndex === -1) {
+    port = serverPart.substring(colonIndex + 1);
+  } else {
+    port = serverPart.substring(colonIndex + 1, questionMarkIndex);
+    
+    // 解析参数
+    const paramsStr = serverPart.substring(questionMarkIndex + 1);
+    paramsStr.split('&').forEach(param => {
+      const [key, value] = param.split('=');
+      params[key] = value;
+    });
+  }
+  
+  // 创建节点对象
+  return {
+    name: name || `Trojan_${server}_${port}`,
+    type: 'trojan',
+    server: server,
+    port: parseInt(port),
+    password: password,
+    sni: params.sni,
+    skip_cert_verify: params.allowInsecure === '1' || params.allowInsecure === 'true'
+  };
 }
 
 /**
