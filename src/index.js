@@ -285,55 +285,79 @@ async function fetchAndParseYaml(yamlUrl) {
 
     let content = await response.text();
     
+    // 预处理YAML内容，移除特殊标签
+    content = preprocessYamlContent(content);
+    
     // 检查内容是否为Base64编码
     if (isBase64(content)) {
       try {
         // 尝试解码Base64内容
         const decodedContent = atob(content.trim());
         content = decodedContent;
+        // 解码后再次预处理
+        content = preprocessYamlContent(content);
       } catch (decodeError) {
         console.warn("Base64解码失败", decodeError);
         // 如果解码失败，继续使用原始内容
       }
     }
     
-    // 检查解码后的内容是否是YAML格式，或是节点URI列表
+    // 修改解析策略: 优先尝试YAML解析，这是最常见的情况
     let config;
+    let yamlError = null;
     
-    // 首先检查内容是否包含节点URI的特征（如以协议前缀开头的行）
-    const hasNodeURIs = checkForNodeURIs(content);
-    
-    if (hasNodeURIs) {
-      // 如果明确包含节点URI，优先作为URI列表处理
-      config = parseURIListToConfig(content);
-      if (config && config.proxies && Array.isArray(config.proxies) && config.proxies.length > 0) {
-        return { config };
-      }
-    }
-    
-    // 尝试解析为YAML
+    // 1. 首先尝试解析为YAML (最常见情况)
     try {
       config = yaml.load(content);
       
       // 验证配置格式
-      if (config && config.proxies && Array.isArray(config.proxies)) {
-        return { config };
+      if (config && typeof config === 'object') {
+        // 确认是否包含代理节点，或者至少是一个对象
+        if (config.proxies && Array.isArray(config.proxies) && config.proxies.length > 0) {
+          return { config };
+        }
+        
+        // 如果仅缺少proxies字段但其他字段存在，可能是不完整的配置，我们可以添加空proxies
+        if (Object.keys(config).length > 0) {
+          config.proxies = config.proxies || [];
+          return { config };
+        }
       }
-    } catch (yamlError) {
-      // YAML解析失败，不做处理，继续尝试其他方法
+    } catch (error) {
+      yamlError = error;
+      // YAML解析失败，将继续尝试URI列表解析
+      console.warn("YAML解析失败:", error.message);
     }
     
-    // 如果YAML解析失败或配置无效，尝试作为URI列表处理
-    config = parseURIListToConfig(content);
+    // 2. 检查内容是否确实包含节点URI特征
+    const hasNodeURIs = checkForNodeURIs(content);
     
-    // 再次验证配置格式
-    if (!config || !config.proxies || !Array.isArray(config.proxies) || config.proxies.length === 0) {
-      return {
-        error: "无效的配置格式或无法识别的节点格式"
-      };
+    // 3. 如果包含节点URI特征，尝试作为URI列表处理
+    if (hasNodeURIs) {
+      try {
+        config = parseURIListToConfig(content);
+        if (config && config.proxies && Array.isArray(config.proxies) && config.proxies.length > 0) {
+          return { config };
+        }
+      } catch (uriError) {
+        console.warn("URI列表解析失败:", uriError.message);
+      }
     }
     
-    return { config };
+    // 4. 如果之前的YAML解析部分成功但没有代理，检查是否有其他关键字段
+    if (config && typeof config === 'object' && Object.keys(config).length > 0) {
+      // 有些配置可能仅包含rules或proxy-groups但没有proxies
+      // 我们可以添加一个空的proxies数组以使其符合要求
+      config.proxies = [];
+      return { config };
+    }
+    
+    // 5. 所有解析方法都失败
+    return {
+      error: yamlError 
+        ? `YAML解析错误: ${yamlError.message}` 
+        : "无效的配置格式或无法识别的节点格式"
+    };
   } catch (e) {
     return { error: e.message };
   }
@@ -350,18 +374,25 @@ function checkForNodeURIs(content) {
   // 将内容分成行
   const lines = content.split(/\r?\n/).map(line => line.trim()).filter(line => line);
   
-  // 检查是否有行以协议前缀开头
+  // 协议前缀列表
   const protocolPrefixes = ['vmess://', 'ss://', 'ssr://', 'trojan://', 'hysteria2://', 'vless://'];
   
+  let validUriCount = 0;
+  
+  // 检查是否有行以协议前缀开头
   for (const line of lines) {
     for (const prefix of protocolPrefixes) {
-      if (line.startsWith(prefix)) {
-        return true;
+      // 更精确的检测：行必须以协议前缀开头，且不在引号或大括号内
+      if (line.startsWith(prefix) && !line.includes('name:') && !line.includes('"') && !line.includes("'") && !line.includes('{')) {
+        validUriCount++;
+        break;
       }
     }
   }
   
-  return false;
+  // 如果有多行匹配URI格式，更有可能是URI列表
+  // 或者如果总行数较少但大部分行都是URI，也认为是URI列表
+  return validUriCount > 0 && (validUriCount > 2 || validUriCount / lines.length > 0.5);
 }
 
 /**
@@ -370,43 +401,69 @@ function checkForNodeURIs(content) {
  * @returns {boolean} 是否为Base64编码
  */
 function isBase64(str) {
-  if (typeof str !== 'string') return false;
+  if (!str || typeof str !== 'string') return false;
   
-  // 去除空白字符
-  const trimmed = str.trim();
+  // 忽略过短的内容
+  if (str.length < 50) return false;
   
-  // 如果长度太短，不太可能是有效的Base64内容
-  if (trimmed.length < 8) return false;
+  // 1. 标准格式检查: 只允许Base64字符集
+  const base64Regex = /^[A-Za-z0-9+/=\r\n]+$/;
+  if (!base64Regex.test(str)) {
+    return false;
+  }
   
-  // 检查是否只包含Base64字符
-  const base64Regex = /^[A-Za-z0-9+/=]+$/;
-  if (!base64Regex.test(trimmed)) return false;
-  
-  // 检查是否包含明确的节点前缀，如果是，不是Base64
-  if (checkForNodeURIs(trimmed)) return false;
-  
-  // 检查YAML格式特征，如果包含这些，不太可能是Base64
-  if (trimmed.includes('proxies:') || 
-      trimmed.includes('proxy-groups:') || 
-      trimmed.includes('rules:')) {
+  // 2. 长度验证: Base64编码的字符串长度应该是4的倍数(可能有填充)
+  const cleanStr = str.replace(/[\r\n]/g, '');
+  if (cleanStr.endsWith('=')) {
+    // 如果有填充字符，移除填充后应该是4的倍数
+    if (cleanStr.endsWith('==')) {
+      if ((cleanStr.length - 2) % 4 !== 0) return false;
+    } else {
+      if ((cleanStr.length - 1) % 4 !== 0) return false;
+    }
+  } else if (cleanStr.length % 4 !== 0) {
     return false;
   }
   
   try {
-    // 尝试解码
-    const decoded = atob(trimmed);
+    // 3. 尝试解码
+    const decoded = atob(cleanStr);
     
-    // 检查解码结果是否包含常见格式的特征
-    if (decoded.includes('proxies:') || 
-        decoded.includes('proxy-groups:') || 
-        decoded.includes('rules:') ||
-        checkForNodeURIs(decoded)) {
-      return true;
+    // 4. 解码后检查: 过滤掉肯定是YAML文本的内容
+    if (decoded.startsWith('proxies:') || 
+        decoded.includes('mixed-port:') || 
+        decoded.startsWith('port:') ||
+        decoded.includes('proxy-groups:')) {
+      return true;  // 这是Base64编码的YAML，应该解码
     }
     
-    // 如果解码结果包含大量可读文本字符，可能是有效的Base64
-    const textChars = decoded.match(/[A-Za-z0-9\s,.;:?!-_'"]/g);
-    return textChars && textChars.length > decoded.length * 0.7;
+    // 5. 计算文本内容比例
+    const textChars = decoded.split('').filter(c => {
+      const code = c.charCodeAt(0);
+      return code >= 32 && code <= 126; // ASCII可打印字符范围
+    }).length;
+    
+    const textRatio = textChars / decoded.length;
+    
+    // 如果解码后可读文本比例较高，且内容够长，可能是文本内容
+    if (textRatio > 0.7 && decoded.length > 30) {
+      // 检查是否包含节点URI特征
+      if (decoded.includes('vmess://') || 
+          decoded.includes('ss://') || 
+          decoded.includes('trojan://') || 
+          decoded.includes('hysteria2://')) {
+        return true; // 这是Base64编码的节点列表，应该解码
+      }
+      
+      // 检查是否包含YAML特征
+      if (decoded.includes('name:') && 
+          (decoded.includes('server:') || decoded.includes('port:') || decoded.includes('type:'))) {
+        return true; // 这是Base64编码的节点配置，应该解码
+      }
+    }
+    
+    // 默认情况，如果文本比例高且没有二进制特征，倾向于认为是Base64编码
+    return textRatio > 0.9;
   } catch (e) {
     // 解码失败，不是有效的Base64
     return false;
@@ -857,4 +914,24 @@ function updateProxyGroups(proxyGroups, validProxyNames) {
     }
     return group;
   });
+}
+
+/**
+ * 预处理YAML内容，处理特殊标签和格式
+ * @param {string} content 原始YAML内容
+ * @returns {string} 预处理后的YAML内容
+ */
+function preprocessYamlContent(content) {
+  if (!content) return content;
+  
+  // 移除特殊的YAML标签，如 !<str>
+  content = content.replace(/!<str>\s+/g, '');
+  content = content.replace(/!\s+/g, '');  // 处理简单的 ! 标签
+  content = content.replace(/!<[^>]+>\s+/g, ''); // 处理所有 !<xxx> 格式标签
+  
+  // 处理其他可能导致解析问题的特殊格式
+  // 处理转义引号
+  content = content.replace(/\\"/g, '"');
+  
+  return content;
 }
