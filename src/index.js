@@ -803,6 +803,90 @@ function deduplicateProxies(proxies) {
 }
 
 /**
+ * 国家/地区名称映射表
+ * 每个中文名称对应其英文简称和全称（大小写不同形式）
+ */
+const regionMappings = {
+  '香港': ['hk', 'HK', 'hongkong', 'Hongkong', 'HongKong', 'HONGKONG', 'hong kong', 'Hong Kong', 'HONG KONG'],
+  '台湾': ['tw', 'TW', 'taiwan', 'Taiwan', 'TAIWAN', 'tai wan', 'Tai Wan', 'TAI WAN'],
+  '日本': ['jp', 'JP', 'japan', 'Japan', 'JAPAN'],
+  '韩国': ['kr', 'KR', 'korea', 'Korea', 'KOREA', 'south korea', 'South Korea', 'SOUTH KOREA'],
+  '新加坡': ['sg', 'SG', 'singapore', 'Singapore', 'SINGAPORE'],
+  '美国': ['us', 'US', 'usa', 'USA', 'united states', 'United States', 'UNITED STATES', 'america', 'America', 'AMERICA'],
+  '英国': ['uk', 'UK', 'united kingdom', 'United Kingdom', 'UNITED KINGDOM', 'britain', 'Britain', 'BRITAIN'],
+  '德国': ['de', 'DE', 'germany', 'Germany', 'GERMANY'],
+  '法国': ['fr', 'FR', 'france', 'France', 'FRANCE'],
+  '印度': ['in', 'IN', 'india', 'India', 'INDIA'],
+  '澳大利亚': ['au', 'AU', 'australia', 'Australia', 'AUSTRALIA'],
+  '加拿大': ['ca', 'CA', 'canada', 'Canada', 'CANADA'],
+  '俄罗斯': ['ru', 'RU', 'russia', 'Russia', 'RUSSIA'],
+  '巴西': ['br', 'BR', 'brazil', 'Brazil', 'BRAZIL'],
+  '意大利': ['it', 'IT', 'italy', 'Italy', 'ITALY'],
+  '荷兰': ['nl', 'NL', 'netherlands', 'Netherlands', 'NETHERLANDS'],
+  '土耳其': ['tr', 'TR', 'turkey', 'Turkey', 'TURKEY'],
+  '泰国': ['th', 'TH', 'thailand', 'Thailand', 'THAILAND'],
+  '越南': ['vn', 'VN', 'vietnam', 'Vietnam', 'VIETNAM'],
+  '马来西亚': ['my', 'MY', 'malaysia', 'Malaysia', 'MALAYSIA'],
+  '菲律宾': ['ph', 'PH', 'philippines', 'Philippines', 'PHILIPPINES'],
+  '印度尼西亚': ['id', 'ID', 'indonesia', 'Indonesia', 'INDONESIA'],
+  '阿根廷': ['ar', 'AR', 'argentina', 'Argentina', 'ARGENTINA'],
+  '瑞士': ['ch', 'CH', 'switzerland', 'Switzerland', 'SWITZERLAND'],
+  '瑞典': ['se', 'SE', 'sweden', 'Sweden', 'SWEDEN'],
+  '挪威': ['no', 'NO', 'norway', 'Norway', 'NORWAY'],
+  '芬兰': ['fi', 'FI', 'finland', 'Finland', 'FINLAND'],
+  '爱尔兰': ['ie', 'IE', 'ireland', 'Ireland', 'IRELAND'],
+  '波兰': ['pl', 'PL', 'poland', 'Poland', 'POLAND'],
+  '南非': ['za', 'ZA', 'south africa', 'South Africa', 'SOUTH AFRICA'],
+  '墨西哥': ['mx', 'MX', 'mexico', 'Mexico', 'MEXICO'],
+  '西班牙': ['es', 'ES', 'spain', 'Spain', 'SPAIN'],
+  '葡萄牙': ['pt', 'PT', 'portugal', 'Portugal', 'PORTUGAL'],
+  '比利时': ['be', 'BE', 'belgium', 'Belgium', 'BELGIUM'],
+  '奥地利': ['at', 'AT', 'austria', 'Austria', 'AUSTRIA']
+};
+
+/**
+ * 扩展区域名称过滤条件
+ * @param {string} nameFilter 原始过滤条件
+ * @returns {string} 扩展后的过滤条件
+ */
+function expandRegionNameFilter(nameFilter) {
+  if (!nameFilter) return nameFilter;
+  
+  // 检查原始过滤条件是否包含任何映射表中的区域名称
+  for (const [region, alternatives] of Object.entries(regionMappings)) {
+    // 如果过滤条件精确匹配某个区域名称，则扩展为包含所有可能的形式
+    if (nameFilter === region || alternatives.includes(nameFilter)) {
+      // 构建一个包含所有可能形式的正则表达式
+      const allForms = [region, ...alternatives];
+      return `(${allForms.join('|')})`;
+    }
+    
+    // 如果过滤条件中包含区域名称，尝试替换为更全面的形式
+    if (nameFilter.includes(region)) {
+      // 注意：这里我们只是简单替换，可能会导致一些边缘情况的问题
+      // 如果需要更精确的替换，可能需要使用正则表达式并检查单词边界
+      const regionPattern = new RegExp(region, 'g');
+      const replacement = `(${region}|${alternatives.join('|')})`;
+      nameFilter = nameFilter.replace(regionPattern, replacement);
+    }
+    
+    // 检查是否包含任何替代形式
+    for (const alt of alternatives) {
+      if (nameFilter.includes(alt)) {
+        // 在过滤条件中找到了替代形式，替换为完整的可选表达式
+        const altPattern = new RegExp(alt, 'g');
+        const altReplacement = `(${region}|${alternatives.join('|')})`;
+        nameFilter = nameFilter.replace(altPattern, altReplacement);
+        // 已经进行了替换，跳出内部循环以避免重复替换
+        break;
+      }
+    }
+  }
+  
+  return nameFilter;
+}
+
+/**
  * 结合两个过滤器
  * 如果两个过滤器都存在，则创建一个匹配两者的正则表达式
  */
@@ -819,13 +903,16 @@ function combineFilters(userFilter, forceFilter) {
  * 过滤代理节点
  */
 function filterProxies(proxies, nameFilter, typeFilter) {
+  // 如果有名称过滤条件，首先扩展它以包含区域名称的各种形式
+  const expandedNameFilter = nameFilter ? expandRegionNameFilter(nameFilter) : null;
+  
   return proxies.filter(proxy => {
     let nameMatch = true;
     let typeMatch = true;
 
-    if (nameFilter && proxy.name) {
+    if (expandedNameFilter && proxy.name) {
       try {
-        const nameRegex = new RegExp(nameFilter);
+        const nameRegex = new RegExp(expandedNameFilter);
         nameMatch = nameRegex.test(proxy.name);
       } catch (error) {
         console.warn('Invalid name regex:', error);
