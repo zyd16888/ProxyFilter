@@ -283,7 +283,19 @@ async function fetchAndParseYaml(yamlUrl) {
       };
     }
 
-    const yamlContent = await response.text();
+    let yamlContent = await response.text();
+    
+    // 检查内容是否为Base64编码
+    if (isBase64(yamlContent)) {
+      try {
+        // 尝试解码Base64内容
+        const decodedContent = atob(yamlContent.trim());
+        yamlContent = decodedContent;
+      } catch (decodeError) {
+        console.warn("Base64解码失败", decodeError);
+        // 如果解码失败，继续使用原始内容
+      }
+    }
     
     // 解析 YAML
     const config = yaml.load(yamlContent);
@@ -298,6 +310,45 @@ async function fetchAndParseYaml(yamlUrl) {
     return { config };
   } catch (e) {
     return { error: e.message };
+  }
+}
+
+/**
+ * 检查字符串是否为Base64编码
+ * @param {string} str 要检查的字符串
+ * @returns {boolean} 是否为Base64编码
+ */
+function isBase64(str) {
+  if (typeof str !== 'string') return false;
+  
+  // 去除空白字符
+  const trimmed = str.trim();
+  
+  // Base64字符串长度应为4的倍数（可能有填充）
+  if (trimmed.length % 4 !== 0 && !trimmed.endsWith('=')) return false;
+  
+  // 检查是否只包含Base64字符
+  const base64Regex = /^[A-Za-z0-9+/=]+$/;
+  if (!base64Regex.test(trimmed)) return false;
+  
+  // 检查YAML格式特征，如果包含这些，不太可能是Base64
+  if (trimmed.includes('proxies:') || 
+      trimmed.includes('proxy-groups:') || 
+      trimmed.includes('rules:')) {
+    return false;
+  }
+  
+  try {
+    // 尝试解码并检查结果是否为有效文本
+    const decoded = atob(trimmed);
+    
+    // 检查解码结果是否包含YAML格式特征
+    return decoded.includes('proxies:') || 
+           decoded.includes('proxy-groups:') || 
+           decoded.includes('rules:');
+  } catch (e) {
+    // 解码失败，不是有效的Base64
+    return false;
   }
 }
 
