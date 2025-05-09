@@ -29,12 +29,31 @@ export default {
     }
     
     // 使用标准方法获取其他参数
-    const nameFilter = url.searchParams.get('name');
-    const typeFilter = url.searchParams.get('type');
+    let nameFilter = url.searchParams.get('name');
+    let typeFilter = url.searchParams.get('type');
+    
+    // 如果未提供参数，尝试使用环境变量中的默认值
+    // 环境变量优先级: URL参数 > 环境变量
+    if (!yamlUrl && env.DEFAULT_URL) {
+      yamlUrl = env.DEFAULT_URL;
+    }
+    
+    if (!nameFilter && env.DEFAULT_NAME_FILTER) {
+      nameFilter = env.DEFAULT_NAME_FILTER;
+    }
+    
+    if (!typeFilter && env.DEFAULT_TYPE_FILTER) {
+      typeFilter = env.DEFAULT_TYPE_FILTER;
+    }
+    
+    // 强制应用环境变量中的过滤器（如果存在）
+    // 这些过滤器会与用户提供的过滤器一起应用
+    const forceNameFilter = env.FORCE_NAME_FILTER;
+    const forceTypeFilter = env.FORCE_TYPE_FILTER;
 
     // 验证必要参数
     if (!yamlUrl) {
-      return new Response('Error: Missing required parameter "url"', {
+      return new Response('Error: Missing required parameter "url" or DEFAULT_URL environment variable', {
         status: 400,
         headers: corsHeaders
       });
@@ -74,8 +93,16 @@ export default {
       // 记录原始节点数量
       const originalCount = config.proxies.length;
 
+      // 构建有效的过滤器
+      const effectiveNameFilter = combineFilters(nameFilter, forceNameFilter);
+      const effectiveTypeFilter = combineFilters(typeFilter, forceTypeFilter);
+      
       // 过滤节点
-      let filteredProxies = filterProxies(config.proxies, nameFilter, typeFilter);
+      let filteredProxies = filterProxies(
+        config.proxies, 
+        effectiveNameFilter, 
+        effectiveTypeFilter
+      );
       
       // 重命名节点
       filteredProxies = renameProxies(filteredProxies);
@@ -95,7 +122,11 @@ export default {
       }
 
       // 添加过滤信息作为注释
-      const filterInfo = `# 原始节点: ${originalCount}, 过滤后节点: ${filteredCount}\n# 名称过滤: ${nameFilter || '无'}, 类型过滤: ${typeFilter || '无'}\n# 生成时间: ${new Date().toISOString()}\n`;
+      const filterInfo = `# 原始节点: ${originalCount}, 过滤后节点: ${filteredCount}\n` +
+                         `# 名称过滤: ${nameFilter || '无'} ${forceNameFilter ? '(强制: ' + forceNameFilter + ')' : ''}\n` +
+                         `# 类型过滤: ${typeFilter || '无'} ${forceTypeFilter ? '(强制: ' + forceTypeFilter + ')' : ''}\n` +
+                         `# 生成时间: ${new Date().toISOString()}\n` +
+                         `# 配置源: ${yamlUrl}\n`;
       
       // 生成 YAML 并返回
       const yamlString = filterInfo + yaml.dump(filteredConfig);
@@ -114,6 +145,19 @@ export default {
     }
   }
 };
+
+/**
+ * 结合两个过滤器
+ * 如果两个过滤器都存在，则创建一个匹配两者的正则表达式
+ */
+function combineFilters(userFilter, forceFilter) {
+  if (!userFilter && !forceFilter) return null;
+  if (!userFilter) return forceFilter;
+  if (!forceFilter) return userFilter;
+  
+  // 两个过滤器都存在，创建匹配两者的正则表达式
+  return `(?=${userFilter})(?=${forceFilter})`;
+}
 
 /**
  * 过滤代理节点
