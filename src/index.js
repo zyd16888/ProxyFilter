@@ -90,7 +90,10 @@ export default {
     if (!yamlUrlParam) {
       return new Response('Error: Missing required parameter "url" or DEFAULT_URL environment variable', {
         status: 400,
-        headers: corsHeaders
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'text/plain; charset=utf-8'
+        }
       });
     }
     
@@ -101,7 +104,10 @@ export default {
     if (yamlUrls.length > 100) {
       return new Response('Error: Too many URLs provided (maximum 100 allowed)', {
         status: 400,
-        headers: corsHeaders
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'text/plain; charset=utf-8'
+        }
       });
     }
 
@@ -146,7 +152,10 @@ export default {
           if (totalOriginalCount > 100000) {
             return new Response('Error: Too many proxies to process (limit: 100000)', {
               status: 400,
-              headers: corsHeaders
+              headers: {
+                ...corsHeaders,
+                'Content-Type': 'text/plain; charset=utf-8'
+              }
             });
           }
         }
@@ -156,7 +165,10 @@ export default {
       if (!firstConfig) {
         return new Response('Error: No valid configuration found from the provided URLs', {
           status: 400,
-          headers: corsHeaders
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'text/plain; charset=utf-8'
+          }
         });
       }
 
@@ -164,7 +176,10 @@ export default {
       if (mergedProxies.length === 0) {
         return new Response('Error: No proxies found in the configurations', {
           status: 400,
-          headers: corsHeaders
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'text/plain; charset=utf-8'
+          }
         });
       }
 
@@ -219,9 +234,17 @@ export default {
         }
       });
     } catch (error) {
-      return new Response(`Error: ${error.message}`, {
+      // 增加详细的错误日志
+      console.error(`处理错误: ${error.message}`, error.stack);
+      
+      // 返回更详细的错误信息
+      const errorMessage = `Error: ${error.message}\n\nStack: ${error.stack || 'No stack trace'}\n`;
+      return new Response(errorMessage, {
         status: 500,
-        headers: corsHeaders
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'text/plain; charset=utf-8'
+        }
       });
     }
   }
@@ -259,20 +282,112 @@ async function fetchAndParseYaml(yamlUrl) {
 
     let content = await response.text();
     
+    // 特殊处理：检查URL是否是已知的V2Ray格式订阅
+    if (yamlUrl.includes('githubusercontent.com') && 
+        (yamlUrl.includes('/v2rayfree/') || 
+         yamlUrl.includes('/aiboboxx/') || 
+         yamlUrl.includes('/freefq/'))) {
+      console.log("检测到已知的V2Ray订阅格式，使用特殊处理");
+      
+      // 这些订阅通常是单行Base64编码的SS/V2Ray节点
+      if (content && content.trim() && /^[A-Za-z0-9+/=\s]+$/.test(content.trim())) {
+        try {
+          const decodedContent = atob(content.replace(/\s/g, ''));
+          if (decodedContent.includes('ss://') || 
+              decodedContent.includes('vmess://') || 
+              decodedContent.includes('trojan://')) {
+            
+            // 解码成功，尝试解析节点
+            const nodeConfig = parseURIListToConfig(decodedContent);
+            if (nodeConfig && nodeConfig.proxies && nodeConfig.proxies.length > 0) {
+              return { config: nodeConfig };
+            } else {
+              return { error: `解析到${decodedContent.split(/\r?\n/).filter(Boolean).length}行内容，但未能提取有效节点` };
+            }
+          }
+        } catch (e) {
+          return { error: `解析V2Ray订阅格式失败: ${e.message}` };
+        }
+      }
+    }
+    
     // 预处理YAML内容，移除特殊标签
     content = preprocessYamlContent(content);
     
+    // 特别检查: 如果内容是纯单行的Base64编码文本，尝试直接处理
+    if (content.trim().split(/\r?\n/).length === 1 && content.length > 100 && /^[A-Za-z0-9+/=\s]+$/.test(content)) {
+      try {
+        console.log("检测到单行可能的Base64内容，尝试直接解码");
+        const cleanContent = content.replace(/\s/g, '');
+        const decodedContent = atob(cleanContent);
+        
+        // 如果解码后的内容包含节点URI特征，直接作为节点列表处理
+        if (decodedContent.includes('ss://') || 
+            decodedContent.includes('vmess://') || 
+            decodedContent.includes('trojan://')) {
+          
+          console.log("解码后内容为节点列表，尝试直接解析");
+          try {
+            const nodeConfig = parseURIListToConfig(decodedContent);
+            if (nodeConfig && nodeConfig.proxies && nodeConfig.proxies.length > 0) {
+              return { config: nodeConfig };
+            }
+          } catch (nodeParseError) {
+            console.warn("节点列表解析失败:", nodeParseError.message);
+          }
+        }
+      } catch (err) {
+        console.warn("单行Base64直接解码失败:", err.message);
+        // 如果直接处理失败，继续使用标准流程
+      }
+    }
+    
     // 检查内容是否为Base64编码
-    if (isBase64(content)) {
+    const isBase64Content = isBase64(content);
+    let originalContent = content;
+    
+    if (isBase64Content) {
       try {
         // 尝试解码Base64内容
-        const decodedContent = atob(content.trim());
+        console.log("检测到Base64编码内容，尝试解码");
+        const decodedContent = atob(content.replace(/\s/g, ''));
         content = decodedContent;
+        
         // 解码后再次预处理
         content = preprocessYamlContent(content);
+        
+        // 检查解码后的内容是否仍然是Base64（有时订阅可能被多次编码）
+        if (content.length > 20 && isBase64(content)) {
+          try {
+            console.log("检测到多重Base64编码，尝试二次解码");
+            const secondDecodedContent = atob(content.replace(/\s/g, ''));
+            content = preprocessYamlContent(secondDecodedContent);
+          } catch (secondDecodeError) {
+            console.warn("二次Base64解码失败", secondDecodeError);
+            // 如果二次解码失败，保持使用第一次解码的结果
+          }
+        }
       } catch (decodeError) {
         console.warn("Base64解码失败", decodeError);
         // 如果解码失败，继续使用原始内容
+        content = originalContent;
+      }
+    }
+    
+    // 使用日志记录内容的前100个字符，帮助调试
+    console.log("解析内容前100个字符:", content.substring(0, 100));
+    
+    // 直接检查解码后的内容是否包含节点URI
+    const hasNodeURIs = checkForNodeURIs(content);
+    if (hasNodeURIs) {
+      try {
+        console.log("检测到节点URI列表，尝试解析");
+        const nodeConfig = parseURIListToConfig(content);
+        if (nodeConfig && nodeConfig.proxies && nodeConfig.proxies.length > 0) {
+          return { config: nodeConfig };
+        }
+      } catch (nodeError) {
+        console.warn("节点列表解析失败:", nodeError.message);
       }
     }
     
@@ -299,39 +414,44 @@ async function fetchAndParseYaml(yamlUrl) {
       }
     } catch (error) {
       yamlError = error;
-      // YAML解析失败，将继续尝试URI列表解析
+      // YAML解析失败，继续下一步尝试
       console.warn("YAML解析失败:", error.message);
     }
     
-    // 2. 检查内容是否确实包含节点URI特征
-    const hasNodeURIs = checkForNodeURIs(content);
-    
-    // 3. 如果包含节点URI特征，尝试作为URI列表处理
-    if (hasNodeURIs) {
+    // 所有解析方法都失败，如果内容已被解码，尝试以原始内容再解析一次
+    if (isBase64Content && originalContent !== content) {
       try {
-        config = parseURIListToConfig(content);
-        if (config && config.proxies && Array.isArray(config.proxies) && config.proxies.length > 0) {
-          return { config };
+        // 尝试解析原始内容
+        console.log("原始内容再次尝试解析");
+        const originalConfig = yaml.load(originalContent);
+        if (originalConfig && typeof originalConfig === 'object') {
+          if (originalConfig.proxies && Array.isArray(originalConfig.proxies) && originalConfig.proxies.length > 0) {
+            return { config: originalConfig };
+          }
+          
+          if (Object.keys(originalConfig).length > 0) {
+            originalConfig.proxies = originalConfig.proxies || [];
+            return { config: originalConfig };
+          }
         }
-      } catch (uriError) {
-        console.warn("URI列表解析失败:", uriError.message);
+      } catch (origError) {
+        console.warn("原始内容解析尝试失败:", origError.message);
       }
     }
     
-    // 4. 如果之前的YAML解析部分成功但没有代理，检查是否有其他关键字段
-    if (config && typeof config === 'object' && Object.keys(config).length > 0) {
-      // 有些配置可能仅包含rules或proxy-groups但没有proxies
-      // 我们可以添加一个空的proxies数组以使其符合要求
-      config.proxies = [];
-      return { config };
+    // 所有解析方法都失败
+    if (isBase64Content) {
+      // 如果是Base64内容解析失败，提供更具体的错误
+      return {
+        error: `Base64内容解码后解析失败: ${yamlError ? yamlError.message : '无法识别的格式'}`
+      };
+    } else {
+      return {
+        error: yamlError 
+          ? `YAML解析错误: ${yamlError.message}` 
+          : "无效的配置格式或无法识别的节点格式"
+      };
     }
-    
-    // 5. 所有解析方法都失败
-    return {
-      error: yamlError 
-        ? `YAML解析错误: ${yamlError.message}` 
-        : "无效的配置格式或无法识别的节点格式"
-    };
   } catch (e) {
     return { error: e.message };
   }
@@ -345,11 +465,11 @@ async function fetchAndParseYaml(yamlUrl) {
 function checkForNodeURIs(content) {
   if (!content) return false;
   
-  // 将内容分成行
+  // 将内容分成行并过滤空行
   const lines = content.split(/\r?\n/).map(line => line.trim()).filter(line => line);
   
   // 协议前缀列表
-  const protocolPrefixes = ['vmess://', 'ss://', 'ssr://', 'trojan://', 'hysteria2://', 'vless://'];
+  const protocolPrefixes = ['vmess://', 'ss://', 'ssr://', 'trojan://', 'hysteria2://', 'vless://', 'http://', 'https://'];
   
   let validUriCount = 0;
   let totalLines = lines.length;
@@ -373,10 +493,19 @@ function checkForNodeURIs(content) {
     }
   }
   
-  // 如果总行数很少（<10行）且至少有一个URI，或者
-  // 如果有多行URI（>1行）且占比较高（>30%），则认为是URI列表
-  return (totalLines < 10 && validUriCount > 0) || 
-         (validUriCount > 1 && (validUriCount / totalLines) > 0.3);
+  // 提高识别准确性：
+  // 1. 如果有很多行，且有效URI占多数（>20%），明显是节点列表
+  // 2. 如果行数少，只要有1个以上的有效URI，也可能是节点列表
+  // 3. 如果只有一行但包含多个URI，可能是连续的URI列表
+  const isMultilineNodeList = 
+    (totalLines >= 5 && validUriCount / totalLines > 0.2) || 
+    (totalLines < 5 && validUriCount > 0) ||
+    (totalLines === 1 && content.includes('ss://') && content.length > 100);
+  
+  // 判断是否为单纯的节点URI列表（非YAML文档）
+  const isNodeUriList = isMultilineNodeList && !content.includes('proxies:') && !content.includes('rules:');
+  
+  return isNodeUriList;
 }
 
 /**
@@ -387,17 +516,41 @@ function checkForNodeURIs(content) {
 function isBase64(str) {
   if (!str || typeof str !== 'string') return false;
   
+  // 清理内容 - 移除所有空白字符
+  const cleanStr = str.replace(/\s/g, '');
+  
   // 忽略过短的内容
-  if (str.length < 50) return false;
+  if (cleanStr.length < 20) return false;
+  
+  // 特殊检测: 单行长字符串且只包含Base64字符集，很可能是Base64编码的节点列表
+  // (例如: https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2)
+  const isSingleLine = str.trim().split(/\r?\n/).length <= 3; // 允许最多3行（包括可能的空行）
+  if (isSingleLine && cleanStr.length > 100) {
+    const base64OnlyRegex = /^[A-Za-z0-9+/=]+$/;
+    if (base64OnlyRegex.test(cleanStr)) {
+      try {
+        // 尝试解码一小部分
+        const testDecode = atob(cleanStr.substring(0, Math.min(cleanStr.length, 1000)));
+        // 检查解码内容是否包含节点URI特征
+        if (testDecode.includes('ss://') || 
+            testDecode.includes('vmess://') || 
+            testDecode.includes('trojan://')) {
+          // 高度可能是节点列表的Base64编码
+          return true;
+        }
+      } catch (e) {
+        // 解码测试失败，可能不是Base64
+      }
+    }
+  }
   
   // 1. 标准格式检查: 只允许Base64字符集
-  const base64Regex = /^[A-Za-z0-9+/=\r\n]+$/;
-  if (!base64Regex.test(str)) {
+  const base64Regex = /^[A-Za-z0-9+/=]+$/;
+  if (!base64Regex.test(cleanStr)) {
     return false;
   }
   
   // 2. 长度验证: Base64编码的字符串长度应该是4的倍数(可能有填充)
-  const cleanStr = str.replace(/[\r\n]/g, '');
   if (cleanStr.endsWith('=')) {
     // 如果有填充字符，移除填充后应该是4的倍数
     if (cleanStr.endsWith('==')) {
@@ -413,15 +566,33 @@ function isBase64(str) {
     // 3. 尝试解码
     const decoded = atob(cleanStr);
     
-    // 4. 解码后检查: 过滤掉肯定是YAML文本的内容
-    if (decoded.startsWith('proxies:') || 
+    // 4. 判断是否为二进制数据
+    const binaryTest = /[\x00-\x08\x0E-\x1F]/.test(decoded);
+    if (binaryTest) {
+      // 二进制数据不太可能是我们想要的配置文件
+      return false;
+    }
+    
+    // 5. 检查解码后是否包含YAML或节点特征
+    // YAML特征
+    if (decoded.includes('proxies:') || 
         decoded.includes('mixed-port:') || 
-        decoded.startsWith('port:') ||
-        decoded.includes('proxy-groups:')) {
+        decoded.includes('port:') ||
+        decoded.includes('proxy-groups:') ||
+        decoded.includes('rules:')) {
       return true;  // 这是Base64编码的YAML，应该解码
     }
     
-    // 5. 计算文本内容比例
+    // 节点URI特征
+    if (decoded.includes('vmess://') || 
+        decoded.includes('ss://') || 
+        decoded.includes('trojan://') ||
+        decoded.includes('vless://') || 
+        decoded.includes('hysteria2://')) {
+      return true; // 这是Base64编码的节点列表，应该解码
+    }
+    
+    // 6. 计算文本内容比例
     const textChars = decoded.split('').filter(c => {
       const code = c.charCodeAt(0);
       return code >= 32 && code <= 126; // ASCII可打印字符范围
@@ -429,26 +600,22 @@ function isBase64(str) {
     
     const textRatio = textChars / decoded.length;
     
-    // 如果解码后可读文本比例较高，且内容够长，可能是文本内容
-    if (textRatio > 0.7 && decoded.length > 30) {
-      // 检查是否包含节点URI特征
-      if (decoded.includes('vmess://') || 
-          decoded.includes('ss://') || 
-          decoded.includes('trojan://') ||
-          decoded.includes('vless://') || 
-          decoded.includes('hysteria2://')) {
-        return true; // 这是Base64编码的节点列表，应该解码
-      }
-      
-      // 检查是否包含YAML特征
+    // 如果解码后文本比例高，并且内容中包含常见的配置关键词
+    if (textRatio > 0.9) {
       if (decoded.includes('name:') && 
           (decoded.includes('server:') || decoded.includes('port:') || decoded.includes('type:'))) {
-        return true; // 这是Base64编码的节点配置，应该解码
+        return true; // 可能是配置文件
+      }
+      
+      // 检查是否有多行内容，可能是代理列表
+      const lines = decoded.split(/\r?\n/).filter(line => line.trim().length > 0);
+      if (lines.length > 2) {
+        return true;
       }
     }
     
-    // 默认情况，如果文本比例高且没有二进制特征，倾向于认为是Base64编码
-    return textRatio > 0.9;
+    // 默认情况下，如果不能确定，返回false
+    return false;
   } catch (e) {
     // 解码失败，不是有效的Base64
     return false;
@@ -470,19 +637,43 @@ function parseURIListToConfig(content) {
   
   // 处理所有类型的URI
   const proxies = [];
+  let parseFailures = 0;
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    
+    // 跳过注释行和空行
+    if (line.startsWith('#') || line.length === 0) {
+      continue;
+    }
+    
+    // 对于非URI开头的行进行跳过
+    if (!line.startsWith('ss://') && 
+        !line.startsWith('ssr://') && 
+        !line.startsWith('vmess://') && 
+        !line.startsWith('trojan://') && 
+        !line.startsWith('vless://') && 
+        !line.startsWith('hysteria2://')) {
+      continue;
+    }
+    
     const proxy = parseURI(line);
     
     if (proxy) {
       proxies.push(proxy);
+    } else {
+      parseFailures++;
+      console.warn(`解析失败: 第${i+1}行: ${line.substring(0, 30)}...`);
     }
   }
   
   if (proxies.length === 0) {
+    // 如果所有节点都解析失败，记录统计信息帮助调试
+    console.warn(`节点解析统计: 总行数=${lines.length}, 解析失败数=${parseFailures}`);
     return null;
   }
+  
+  console.log(`成功解析节点: ${proxies.length}个, 失败: ${parseFailures}个`);
   
   // 创建默认配置
   return {
@@ -497,6 +688,14 @@ function parseURIListToConfig(content) {
         name: '节点选择',
         type: 'select',
         proxies: ['DIRECT', ...proxies.map(p => p.name)]
+      },
+      {
+        name: '自动选择',
+        type: 'url-test',
+        url: 'http://www.gstatic.com/generate_204',
+        interval: 300,
+        tolerance: 50,
+        proxies: [...proxies.map(p => p.name)]
       }
     ],
     rules: [
@@ -1037,56 +1236,146 @@ function filterProxies(proxies, nameFilter, typeFilter) {
  * @returns {Array} 重命名后的节点数组
  */
 function renameProxies(proxies, nameFilter) {
-  // 如果没有过滤条件，使用原始命名逻辑
-  if (!nameFilter) {
-    // 用于跟踪不同前缀的节点计数
-    const prefixCounts = {};
+  // 无论是否有过滤条件，都尝试识别节点的区域并进行分组
+  // 1. 根据节点名自动识别区域
+  const proxyWithRegion = proxies.map(proxy => {
+    const nodeName = proxy.name || '';
+    let region = '';
     
-    return proxies.map(proxy => {
-      if (proxy.name) {
-        // 分割名称并获取第一部分
-        const parts = proxy.name.split('_');
-        const prefix = parts[0] || 'node';
-        
-        // 更新该前缀的计数
-        prefixCounts[prefix] = (prefixCounts[prefix] || 0) + 1;
-        
-        // 创建新名称
-        const newName = `${prefix}_${prefixCounts[prefix]}`;
-        
-        // 返回带有新名称的代理节点
-        return {
-          ...proxy,
-          name: newName
-        };
+    // 尝试从节点名中识别区域
+    for (const [regionName, alternatives] of Object.entries(regionMappings)) {
+      if (nodeName.toLowerCase().includes(regionName.toLowerCase())) {
+        region = regionName;
+        break;
       }
-      return proxy;
-    });
-  }
-
-  // 解析过滤条件中可能包含的区域名称
-  const regionConditions = parseRegionConditions(nameFilter);
+      
+      // 检查备选形式
+      const found = alternatives.some(alt => 
+        nodeName.toLowerCase().includes(alt.toLowerCase())
+      );
+      
+      if (found) {
+        region = regionName;
+        break;
+      }
+    }
+    
+    // 如果识别不到区域，提取名称前缀或使用默认值
+    if (!region) {
+      // 尝试从服务器地址判断区域（对特定IP段）
+      if (proxy.server) {
+        region = guessRegionFromServer(proxy.server);
+      }
+      
+      // 如果仍然无法判断，提取名称前缀或使用默认值
+      if (!region) {
+        const parts = nodeName.split(/[\s_\-+|:：]/);
+        region = parts[0] || "节点";
+      }
+    }
+    
+    return { ...proxy, region };
+  });
   
-  // 用于跟踪每个区域的节点计数
+  // 2. 按区域分组并计数
   const regionCounts = {};
   
-  // 根据节点名称匹配的区域进行重命名
-  return proxies.map(proxy => {
-    // 确定节点匹配的区域
-    const matchedRegion = determineMatchedRegion(proxy.name, regionConditions);
+  // 如果有过滤条件，使用条件中的区域，否则使用自动识别的区域
+  if (nameFilter) {
+    // 已有过滤条件的处理逻辑 - 解析过滤条件中的区域
+    const regionConditions = parseRegionConditions(nameFilter);
     
-    // 更新该区域的计数
-    regionCounts[matchedRegion] = (regionCounts[matchedRegion] || 0) + 1;
+    return proxyWithRegion.map(proxy => {
+      // 确定节点匹配的区域
+      const matchedRegion = determineMatchedRegion(proxy.name, regionConditions);
+      
+      // 更新该区域的计数
+      regionCounts[matchedRegion] = (regionCounts[matchedRegion] || 0) + 1;
+      
+      // 创建新名称，使用匹配的区域名称
+      const newName = `${matchedRegion}_${regionCounts[matchedRegion]}`;
+      
+      // 返回带有新名称的代理节点
+      return {
+        ...proxy,
+        name: newName
+      };
+    });
+  } else {
+    // 没有过滤条件时的改进处理逻辑
+    // 排序顺序: 1. 按区域分组 2. 同一区域内可选按类型次要排序
+    proxyWithRegion.sort((a, b) => {
+      if (a.region !== b.region) {
+        return a.region.localeCompare(b.region);
+      }
+      // 次要排序: 按类型
+      return (a.type || '').localeCompare(b.type || '');
+    });
     
-    // 创建新名称，使用匹配的区域名称
-    const newName = `${matchedRegion}_${regionCounts[matchedRegion]}`;
+    // 按区域重命名
+    return proxyWithRegion.map(proxy => {
+      // 更新该区域的计数
+      regionCounts[proxy.region] = (regionCounts[proxy.region] || 0) + 1;
+      
+      // 规范化区域名称 - 使用中文区域名称或原始区域标识
+      const displayRegion = proxy.region;
+      
+      // 创建新名称
+      const newName = `${displayRegion}_${regionCounts[proxy.region]}`;
+      
+      // 返回带有新名称的代理节点
+      return {
+        ...proxy,
+        name: newName
+      };
+    });
+  }
+}
+
+/**
+ * 根据服务器IP地址猜测区域
+ * @param {string} server 服务器地址
+ * @returns {string} 猜测的区域名称，无法判断时返回空字符串
+ */
+function guessRegionFromServer(server) {
+  // 简单的IP判断逻辑
+  // 注意: 这只是一个基础实现，实际IP地理位置需要更完整的数据库
+  
+  // 检查是否为IP地址 (简单判断)
+  const isIP = /^(\d{1,3}\.){3}\d{1,3}$/.test(server);
+  if (!isIP) {
+    // 判断域名后缀
+    if (server.endsWith('.jp') || server.includes('japan') || server.includes('jp')) {
+      return '日本';
+    } else if (server.endsWith('.hk') || server.includes('hongkong') || server.includes('hk')) {
+      return '香港';
+    } else if (server.endsWith('.sg') || server.includes('singapore') || server.includes('sg')) {
+      return '新加坡';
+    } else if (server.endsWith('.tw') || server.includes('taiwan') || server.includes('tw')) {
+      return '台湾';
+    } else if (server.endsWith('.us') || server.includes('america') || server.includes('us')) {
+      return '美国';
+    } else if (server.endsWith('.kr') || server.includes('korea') || server.includes('kr')) {
+      return '韩国';
+    }
     
-    // 返回带有新名称的代理节点
-    return {
-      ...proxy,
-      name: newName
-    };
-  });
+    return '';
+  }
+  
+  // 将IP转换为数字数组
+  const ipParts = server.split('.').map(part => parseInt(part, 10));
+  
+  // 检查一些已知的IP范围
+  // 这只是示例，实际应使用完整的IP地理位置数据库
+  if (ipParts[0] === 13 || ipParts[0] === 14) {
+    return '美国'; // 示例: 13.x.x.x 和 14.x.x.x 可能是美国IP
+  } else if (ipParts[0] === 103 && ipParts[1] >= 100 && ipParts[1] <= 110) {
+    return '新加坡'; // 示例: 103.10x.x.x 可能是新加坡IP
+  } else if (ipParts[0] === 101 && ipParts[1] >= 32 && ipParts[1] <= 36) {
+    return '日本'; // 示例: 101.3x.x.x 可能是日本IP
+  }
+  
+  return '';
 }
 
 /**
