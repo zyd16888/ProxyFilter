@@ -66,6 +66,9 @@ export default {
     // 使用标准方法获取其他参数
     let nameFilter = url.searchParams.get('name');
     let typeFilter = url.searchParams.get('type');
+    let templateUrl = url.searchParams.get('template'); // 模板配置URL参数
+    let templateContent = url.searchParams.get('template_content'); // 新增: 直接传递的模板内容
+    let serverFilter = url.searchParams.get('server'); // 新增: 服务器类型过滤参数(domain或ip)
     
     // 如果未提供参数，尝试使用环境变量中的默认值
     // 环境变量优先级: URL参数 > 环境变量
@@ -80,11 +83,20 @@ export default {
     if (!typeFilter && env.DEFAULT_TYPE_FILTER) {
       typeFilter = env.DEFAULT_TYPE_FILTER;
     }
+
+    if (!templateUrl && env.DEFAULT_TEMPLATE_URL) {
+      templateUrl = env.DEFAULT_TEMPLATE_URL;
+    }
+
+    if (!serverFilter && env.DEFAULT_SERVER_FILTER) {
+      serverFilter = env.DEFAULT_SERVER_FILTER;
+    }
     
     // 强制应用环境变量中的过滤器（如果存在）
     // 这些过滤器会与用户提供的过滤器一起应用
     const forceNameFilter = env.FORCE_NAME_FILTER;
     const forceTypeFilter = env.FORCE_TYPE_FILTER;
+    const forceServerFilter = env.FORCE_SERVER_FILTER; // 新增: 强制服务器类型过滤
 
     // 验证必要参数
     if (!yamlUrlParam) {
@@ -192,12 +204,14 @@ export default {
       // 构建有效的过滤器
       const effectiveNameFilter = combineFilters(nameFilter, forceNameFilter);
       const effectiveTypeFilter = combineFilters(typeFilter, forceTypeFilter);
+      const effectiveServerFilter = combineFilters(serverFilter, forceServerFilter);
       
       // 过滤节点
       let filteredProxies = filterProxies(
         mergedProxies, 
         effectiveNameFilter, 
-        effectiveTypeFilter
+        effectiveTypeFilter,
+        effectiveServerFilter
       );
       
       // 重命名节点，使用名称过滤条件
@@ -218,11 +232,12 @@ export default {
       }
 
       // 添加过滤信息作为注释
-      const filterInfo = `# 原始节点总计: ${totalOriginalCount}, 去重后: ${afterDedupeCount} (移除了${duplicateCount}个重复节点), 过滤后节点: ${filteredCount}\n` +
-                         `# 名称过滤: ${nameFilter || '无'} ${forceNameFilter ? '(强制: ' + forceNameFilter + ')' : ''}\n` +
-                         `# 类型过滤: ${typeFilter || '无'} ${forceTypeFilter ? '(强制: ' + forceTypeFilter + ')' : ''}\n` +
-                         `# 生成时间: ${new Date().toISOString()}\n` +
-                         `# 配置源: \n# ${sourceUrlInfo.join('\n# ')}\n`;
+      let filterInfo = `# 原始节点总计: ${totalOriginalCount}, 去重后: ${afterDedupeCount} (移除了${duplicateCount}个重复节点), 过滤后节点: ${filteredCount}\n` +
+                       `# 名称过滤: ${nameFilter || '无'} ${forceNameFilter ? '(强制: ' + forceNameFilter + ')' : ''}\n` +
+                       `# 类型过滤: ${typeFilter || '无'} ${forceTypeFilter ? '(强制: ' + forceTypeFilter + ')' : ''}\n` +
+                       `# 服务器类型过滤: ${serverFilter || '无'} ${forceServerFilter ? '(强制: ' + forceServerFilter + ')' : ''}\n` +
+                       `# 生成时间: ${new Date().toISOString()}\n` +
+                       `# 配置源: \n# ${sourceUrlInfo.join('\n# ')}\n`;
       
       // 生成 YAML 并返回
       const yamlString = filterInfo + yaml.dump(filteredConfig);
@@ -1193,15 +1208,79 @@ function combineFilters(userFilter, forceFilter) {
 }
 
 /**
+ * 判断字符串是否为IP地址
+ * @param {string} str 要检查的字符串
+ * @returns {boolean} 是否为IP地址
+ */
+function isIPAddress(str) {
+  if (!str) return false;
+  
+  // IPv4地址格式检查
+  const ipv4Pattern = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const match = str.match(ipv4Pattern);
+  
+  if (!match) return false;
+  
+  // 验证每个部分是否在0-255范围内
+  for (let i = 1; i <= 4; i++) {
+    const part = parseInt(match[i]);
+    if (part < 0 || part > 255) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+/**
+ * 判断字符串是否为域名
+ * @param {string} str 要检查的字符串
+ * @returns {boolean} 是否为域名
+ */
+function isDomainName(str) {
+  if (!str) return false;
+  
+  // 如果是IP，则不是域名
+  if (isIPAddress(str)) return false;
+  
+  // 以下是一些常见的非域名服务器地址
+  if (str === 'localhost' || str.startsWith('127.') || str === '0.0.0.0') {
+    return false;
+  }
+  
+  // 多级检查 - 先用宽松规则，再用严格规则
+  
+  // 1. 基本检查: 域名需要至少包含一个点，并且没有空格和特殊字符
+  if (!str.includes('.') || /\s/.test(str)) {
+    return false;
+  }
+  
+  // 2. 宽松检查: 域名格式检查(包括国际化域名支持)
+  // 这个正则表达式比较宽松，允许大多数合法域名格式
+  const looseDomainPattern = /^([a-zA-Z0-9_]([a-zA-Z0-9\-_]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9\-]{1,}$/;
+  
+  // 3. 特殊情况: 某些特殊的二级域名格式可能不符合严格规则
+  // 例如: 以数字结尾的域名 (example.123)、非标准顶级域名等
+  // 如果域名长度适中且至少包含一个点，而且不含空格或奇怪字符，很可能是域名
+  const isPotentialDomain = str.length > 3 && str.length < 255 && 
+                          str.includes('.') && 
+                          !/[\s,!@#$%^&*()+={}\[\]:;"'<>?\/\\|]/.test(str);
+  
+  // 返回检查结果: 如果通过宽松规则，或者看起来很像域名，则认为是域名
+  return looseDomainPattern.test(str) || isPotentialDomain;
+}
+
+/**
  * 过滤代理节点
  */
-function filterProxies(proxies, nameFilter, typeFilter) {
+function filterProxies(proxies, nameFilter, typeFilter, serverFilter) {
   // 如果有名称过滤条件，首先扩展它以包含区域名称的各种形式
   const expandedNameFilter = nameFilter ? expandRegionNameFilter(nameFilter) : null;
   
   return proxies.filter(proxy => {
     let nameMatch = true;
     let typeMatch = true;
+    let serverMatch = true;
 
     if (expandedNameFilter && proxy.name) {
       try {
@@ -1223,7 +1302,25 @@ function filterProxies(proxies, nameFilter, typeFilter) {
       }
     }
 
-    return nameMatch && typeMatch;
+    if (serverFilter && proxy.server) {
+      // 特殊处理'domain'和'ip'关键词
+      if (serverFilter === 'domain') {
+        serverMatch = isDomainName(proxy.server);
+      } else if (serverFilter === 'ip') {
+        serverMatch = isIPAddress(proxy.server);
+      } else {
+        try {
+          // 对于其他值，使用正则表达式匹配
+          const serverRegex = new RegExp(serverFilter);
+          serverMatch = serverRegex.test(proxy.server);
+        } catch (error) {
+          console.warn('Invalid server regex:', error);
+          serverMatch = true;
+        }
+      }
+    }
+
+    return nameMatch && typeMatch && serverMatch;
   });
 }
 
@@ -1342,7 +1439,7 @@ function guessRegionFromServer(server) {
   // 注意: 这只是一个基础实现，实际IP地理位置需要更完整的数据库
   
   // 检查是否为IP地址 (简单判断)
-  const isIP = /^(\d{1,3}\.){3}\d{1,3}$/.test(server);
+  const isIP = isIPAddress(server);
   if (!isIP) {
     // 判断域名后缀
     if (server.endsWith('.jp') || server.includes('japan') || server.includes('jp')) {
@@ -1357,6 +1454,14 @@ function guessRegionFromServer(server) {
       return '美国';
     } else if (server.endsWith('.kr') || server.includes('korea') || server.includes('kr')) {
       return '韩国';
+    } else if (server.endsWith('.uk') || server.includes('united.kingdom')) {
+      return '英国';
+    } else if (server.endsWith('.de') || server.includes('germany')) {
+      return '德国';
+    } else if (server.endsWith('.fr') || server.includes('france')) {
+      return '法国';
+    } else if (server.endsWith('.ca') || server.includes('canada')) {
+      return '加拿大';
     }
     
     return '';
@@ -1373,6 +1478,10 @@ function guessRegionFromServer(server) {
     return '新加坡'; // 示例: 103.10x.x.x 可能是新加坡IP
   } else if (ipParts[0] === 101 && ipParts[1] >= 32 && ipParts[1] <= 36) {
     return '日本'; // 示例: 101.3x.x.x 可能是日本IP
+  } else if ((ipParts[0] === 219 || ipParts[0] === 220) && ipParts[1] >= 68 && ipParts[1] <= 88) {
+    return '香港'; // 示例: 219.7x.x.x 可能是香港IP
+  } else if (ipParts[0] === 182 && ipParts[1] >= 230 && ipParts[1] <= 250) {
+    return '台湾'; // 示例: 182.24x.x.x 可能是台湾IP
   }
   
   return '';
