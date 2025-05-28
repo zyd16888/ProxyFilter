@@ -41,25 +41,25 @@ proxy-groups:
 - name: 手动选择
   type: select
   proxies:
+  - 自动选择
   - 负载散列
   - 负载轮询
-  - 自动选择
   - DIRECT
 
 - name: 自动选择
   type: url-test
   proxies: []
-  url: http://www.gstatic.com/generate_204
+  url: http://www.msftconnecttest.com/connecttest.txt
   interval: 3600
 - name: 负载散列
   type: load-balance
-  url: http://www.google.com/generate_204
+  url: http://www.msftconnecttest.com/connecttest.txt
   interval: 3600
   strategy: consistent-hashing
   proxies: []
 - name: 负载轮询
   type: load-balance
-  url: http://www.google.com/generate_204
+  url: http://www.msftconnecttest.com/connecttest.txt
   interval: 3600
   strategy: round-robin
   proxies: []
