@@ -702,6 +702,7 @@ export default {
     let templateUrl = url.searchParams.get('template'); // 模板配置URL参数
     let templateContent = url.searchParams.get('template_content'); // 新增: 直接传递的模板内容
     let serverFilter = url.searchParams.get('server'); // 新增: 服务器类型过滤参数(domain或ip)
+    let limit = parseInt(url.searchParams.get('limit'), 10) || 8; // 新增: 限制采集URL数量的参数，默认为8
     
     // 如果未提供参数，尝试使用环境变量中的默认值
     // 环境变量优先级: URL参数 > 环境变量
@@ -743,7 +744,12 @@ export default {
     }
     
     // 分割多URL参数（用逗号分隔）
-    const yamlUrls = yamlUrlParam.split(',').map(u => u.trim()).filter(u => u);
+    let yamlUrls = yamlUrlParam.split(',').map(u => u.trim()).filter(u => u);
+
+    // 如果是从默认URL获取的，并且设置了limit参数，则进行截取
+    if (yamlUrlParam === env.DEFAULT_URL && limit > 0) {
+      yamlUrls = yamlUrls.slice(0, limit);
+    }
     
     // 限制URL数量，避免过多处理
     if (yamlUrls.length > 100) {
